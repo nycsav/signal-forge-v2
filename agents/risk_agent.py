@@ -34,13 +34,14 @@ for grp, syms in CORRELATED_GROUPS.items():
 
 class RiskAgent:
     # Risk parameters (from spec Section 4)
-    MAX_POSITION_PCT = 0.02          # 2% per trade
-    HIGH_CONVICTION_PCT = 0.025      # 2.5% for score >= 75
+    MAX_POSITION_PCT = 0.02          # 2% per trade (hard cap)
+    HIGH_CONVICTION_PCT = 0.025      # 2.5% for score >= 85
     MAX_OPEN_POSITIONS = 5
     DAILY_LOSS_LIMIT = 0.05          # 5%
     WEEKLY_LOSS_LIMIT = 0.10         # 10%
     MIN_SIGNAL_SCORE = 55
-    MAX_SAME_GROUP = 2
+    MIN_AI_CONFIDENCE = 0.45
+    MAX_SAME_GROUP = 3               # Max per sector (spec: 3)
     MIN_RISK_REWARD = 2.0
 
     def __init__(self, event_bus: EventBus, db_path: str, portfolio_value: float):
@@ -53,6 +54,7 @@ class RiskAgent:
         """Run all 7 risk checks. Any failure = VETO."""
         checks = [
             self._check_signal_threshold(proposal),
+            self._check_ai_confidence(proposal),
             self._check_position_count(),
             self._check_daily_loss(),
             self._check_weekly_loss(),
@@ -69,7 +71,6 @@ class RiskAgent:
         # All checks passed — approve with sizing
         size_pct = self._calculate_position_size(proposal)
         size_usd = self.portfolio_value * size_pct
-        kelly = self._half_kelly(proposal.raw_score)
 
         event = RiskAssessmentEvent(
             timestamp=datetime.now(),
@@ -77,7 +78,7 @@ class RiskAgent:
             decision=RiskDecision.APPROVED,
             approved_size_usd=size_usd,
             approved_size_pct_portfolio=size_pct,
-            kelly_fraction=kelly,
+            kelly_fraction=size_pct,
             risk_score=self._compute_risk_score(proposal),
             correlation_warning=False,
             open_positions_count=len(self.repo.get_open_trades()),
@@ -119,6 +120,11 @@ class RiskAgent:
     def _check_signal_threshold(self, p: TradeProposal) -> tuple[bool, str]:
         if p.raw_score < self.MIN_SIGNAL_SCORE:
             return False, f"Score {p.raw_score:.0f} < minimum {self.MIN_SIGNAL_SCORE}"
+        return True, ""
+
+    def _check_ai_confidence(self, p: TradeProposal) -> tuple[bool, str]:
+        if p.ai_confidence < self.MIN_AI_CONFIDENCE:
+            return False, f"AI confidence {p.ai_confidence:.2f} < minimum {self.MIN_AI_CONFIDENCE}"
         return True, ""
 
     def _check_position_count(self) -> tuple[bool, str]:
@@ -185,15 +191,33 @@ class RiskAgent:
     # ── Sizing ──
 
     def _calculate_position_size(self, p: TradeProposal) -> float:
-        base_pct = self.HIGH_CONVICTION_PCT if p.raw_score >= 75 else self.MAX_POSITION_PCT
-        kelly = self._half_kelly(p.raw_score)
-        score_mult = 0.5 + (p.raw_score / 100) * 0.5
-        return min(base_pct, kelly * score_mult)
+        """Half-Kelly with conviction scaling per spec Section 4.1."""
+        # Win probability from score: p = 0.40 + (score/100 × 0.35)
+        win_prob = 0.40 + (p.raw_score / 100) * 0.35
+        q = 1 - win_prob
 
-    def _half_kelly(self, score: float, win_rate: float = 0.55, avg_win: float = 0.06, avg_loss: float = 0.03) -> float:
-        b = avg_win / avg_loss
-        full_kelly = (win_rate * b - (1 - win_rate)) / b
-        return max(0.005, full_kelly / 2)
+        # Reward/risk ratio from TP1/stop distances
+        risk_dist = abs(p.suggested_entry - p.suggested_stop) if p.suggested_stop else p.suggested_entry * 0.03
+        reward_dist = abs(p.suggested_tp1 - p.suggested_entry) if p.suggested_tp1 else risk_dist * 1.5
+        b = reward_dist / risk_dist if risk_dist > 0 else 0.9
+
+        # Full Kelly then half
+        full_kelly = win_prob - (q / b) if b > 0 else 0
+        half_kelly = max(0, full_kelly / 2)
+
+        # Conviction scale: 55-70→0.50, 70-85→0.75, 85-100→1.00
+        if p.raw_score >= 85:
+            conviction = 1.00
+        elif p.raw_score >= 70:
+            conviction = 0.75
+        else:
+            conviction = 0.50
+
+        # AI confidence modifier: 0.70 + (ai_confidence × 0.30)
+        ai_mod = 0.70 + (p.ai_confidence * 0.30)
+
+        final = half_kelly * conviction * ai_mod
+        return min(self.MAX_POSITION_PCT, max(0.005, final))
 
     def _compute_risk_score(self, p: TradeProposal) -> float:
         """0 = safe, 1 = maximum risk."""

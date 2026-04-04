@@ -21,6 +21,8 @@ from agents.sentiment_agent import SentimentAgent
 from agents.onchain_agent import OnChainAgent
 from agents.ai_analyst_agent import AIAnalystAgent
 from agents.risk_agent import RiskAgent
+from agents.execution_agent import ExecutionAgent
+from agents.monitor_agent import MonitorAgent
 from agents.scoring import SignalScorer
 from db.repository import Repository
 from dashboard.app import app as dashboard_app
@@ -52,6 +54,8 @@ class SignalForgeOrchestrator:
 
         # Tier 3 agents
         self.risk = RiskAgent(self.bus, settings.database_path, settings.portfolio_value)
+        self.execution = ExecutionAgent(self.bus, config)
+        self.monitor = MonitorAgent(self.bus, settings.database_path)
 
         # Orchestrator state for bundle assembly
         self._market_states: dict = {}
@@ -140,6 +144,9 @@ class SignalForgeOrchestrator:
             )),
             asyncio.create_task(self.sentiment.run_forever(interval_seconds=900)),
             asyncio.create_task(self.onchain.run_forever(interval_seconds=3600)),
+            asyncio.create_task(self.monitor.run_monitor_loop(
+                interval_seconds=settings.monitor_interval_seconds
+            )),
         ]
 
         # Start dashboard
