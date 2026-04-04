@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html>
+<head>
+<title>Signal Forge v2</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<style>
+body { background: #0d1117; color: #e6edf3; font-family: 'Monaco', 'JetBrains Mono', monospace; margin: 0; font-size: 13px; }
+.header { background: #161b22; padding: 12px 24px; border-bottom: 1px solid #30363d; display: flex; align-items: center; justify-content: space-between; }
+.header h1 { margin: 0; font-size: 18px; color: #58a6ff; }
+.header-stats { display: flex; gap: 20px; font-size: 12px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; padding: 16px; }
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 0 16px 16px; }
+@media (max-width: 900px) { .grid { grid-template-columns: 1fr; } .grid-2 { grid-template-columns: 1fr; } }
+.card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; }
+.card h3 { margin: 0 0 12px 0; font-size: 12px; color: #8b949e; text-transform: uppercase; letter-spacing: 1px; }
+.metric-value { font-size: 28px; font-weight: bold; }
+.label { color: #8b949e; font-size: 11px; margin-bottom: 4px; }
+.positive { color: #3fb950; }
+.negative { color: #f85149; }
+.neutral { color: #8b949e; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #21262d; font-size: 12px; }
+th { color: #8b949e; font-size: 11px; text-transform: uppercase; }
+tr:hover { background: #1c2128; }
+.badge { padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+.badge-green { background: #1a3322; color: #3fb950; }
+.badge-red { background: #3d1a1a; color: #f85149; }
+.badge-blue { background: #1a2744; color: #58a6ff; }
+.badge-gray { background: #21262d; color: #8b949e; }
+.badge-yellow { background: #3d3314; color: #d29922; }
+.pulse { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; animation: pulse 2s infinite; }
+.pulse-green { background: #3fb950; }
+.pulse-red { background: #f85149; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+.ticker { display: flex; gap: 16px; padding: 8px 24px; background: #0d1117; border-bottom: 1px solid #21262d; overflow-x: auto; font-size: 12px; }
+.ticker-item { white-space: nowrap; }
+.ticker-sym { color: #e6edf3; font-weight: 600; }
+.ticker-price { color: #8b949e; margin-left: 6px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div style="display:flex; align-items:center; gap:12px">
+    <h1>SIGNAL FORGE v2</h1>
+    <span class="badge badge-blue" id="mode-badge">PAPER</span>
+    <span id="system-badge"><span class="pulse pulse-red"></span>Connecting...</span>
+  </div>
+  <div class="header-stats">
+    <div>F&G: <span id="h-fg">--</span></div>
+    <div>Ollama: <span id="h-ollama">--</span></div>
+    <div id="h-time">--</div>
+  </div>
+</div>
+
+<div class="ticker" id="ticker"></div>
+
+<div class="grid">
+  <div class="card">
+    <div class="label">Portfolio Value</div>
+    <div class="metric-value" id="portfolio-value">--</div>
+  </div>
+  <div class="card">
+    <div class="label">Unrealized P&L</div>
+    <div class="metric-value" id="daily-pnl">--</div>
+  </div>
+  <div class="card">
+    <div class="label">Open Positions</div>
+    <div class="metric-value" id="open-positions">--</div>
+  </div>
+</div>
+
+<div style="padding: 0 16px 16px">
+  <div class="card">
+    <h3>Open Positions</h3>
+    <table>
+      <thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Current</th><th>Value</th><th>P&L</th><th>P&L %</th></tr></thead>
+      <tbody id="pos-tbody"></tbody>
+    </table>
+    <p id="no-pos" style="text-align:center; padding:16px; color:#8b949e">No open positions</p>
+  </div>
+</div>
+
+<div class="grid-2">
+  <div class="card">
+    <h3>Recent Signals</h3>
+    <table>
+      <thead><tr><th>Time</th><th>Symbol</th><th>Score</th><th>Dir</th><th>Decision</th><th>Rationale</th></tr></thead>
+      <tbody id="sig-tbody"></tbody>
+    </table>
+    <p id="no-sig" style="text-align:center; padding:16px; color:#8b949e">No signals yet</p>
+  </div>
+  <div class="card">
+    <h3>Recent Orders</h3>
+    <table>
+      <thead><tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Price</th><th>Status</th><th>Time</th></tr></thead>
+      <tbody id="ord-tbody"></tbody>
+    </table>
+    <p id="no-ord" style="text-align:center; padding:16px; color:#8b949e">No orders yet</p>
+  </div>
+</div>
+
+<div style="padding: 0 16px 16px">
+  <div class="card">
+    <h3>Performance</h3>
+    <div class="grid" style="padding:0" id="perf-grid"></div>
+  </div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const money = v => { v = Number(v)||0; return (v<0?'-':'')+'$'+Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); };
+const pct = v => { v = Number(v)||0; return (v>=0?'+':'')+v.toFixed(2)+'%'; };
+const cls = v => Number(v)>0?'positive':Number(v)<0?'negative':'neutral';
+const fmtPrice = v => { v=Number(v); if(!v)return'--'; return v>=1000?'$'+v.toLocaleString('en-US',{maximumFractionDigits:0}):v>=1?'$'+v.toFixed(2):'$'+v.toFixed(4); };
+const timeAgo = t => { if(!t)return'--'; let s=Math.floor((Date.now()-new Date(t))/1000); return s<60?s+'s':s<3600?Math.floor(s/60)+'m':s<86400?Math.floor(s/3600)+'h':Math.floor(s/86400)+'d'; };
+
+async function fetchStatus() {
+  try {
+    let r = await fetch('/api/status'); let d = await r.json();
+    let a = d.alpaca||{};
+    $('portfolio-value').textContent = money(a.portfolio_value);
+    $('portfolio-value').className = 'metric-value';
+    $('daily-pnl').textContent = money(d.unrealized_pl);
+    $('daily-pnl').className = 'metric-value ' + cls(d.unrealized_pl);
+    $('open-positions').textContent = d.positions_count + '/5';
+    let fg = d.fear_greed||{};
+    $('h-fg').innerHTML = `<span class="${fg.value<30?'negative':fg.value<55?'neutral':'positive'}">${fg.value}</span> ${fg.classification||''}`;
+    let ol = d.ollama||{};
+    $('h-ollama').innerHTML = ol.status==='online'?'<span class="positive">Online</span>':'<span class="negative">Offline</span>';
+    $('h-time').textContent = new Date().toLocaleTimeString();
+    $('system-badge').innerHTML = `<span class="pulse pulse-green"></span>Live`;
+    $('mode-badge').textContent = d.mode?.toUpperCase() || 'PAPER';
+  } catch(e) { $('system-badge').innerHTML = `<span class="pulse pulse-red"></span>Offline`; }
+}
+
+async function fetchPrices() {
+  try {
+    let r = await fetch('/api/prices'); let d = await r.json(); let p = d.prices||{};
+    $('ticker').innerHTML = Object.entries(p).filter(([,v])=>v>0).map(([k,v])=>
+      `<div class="ticker-item"><span class="ticker-sym">${k.replace('-USD','')}</span><span class="ticker-price">${fmtPrice(v)}</span></div>`
+    ).join('');
+  } catch(e) {}
+}
+
+async function fetchPositions() {
+  try {
+    let r = await fetch('/api/positions'); let d = await r.json(); let pos = d.positions||[];
+    if (!pos.length) { $('pos-tbody').innerHTML=''; $('no-pos').style.display='block'; return; }
+    $('no-pos').style.display='none';
+    $('pos-tbody').innerHTML = pos.map(p => {
+      let plpc = p.unrealized_plpc*100;
+      return `<tr><td><b>${p.symbol}</b></td><td>${p.side}</td><td>${fmtPrice(p.avg_entry)}</td><td>${fmtPrice(p.current_price)}</td>
+        <td>${money(p.market_value)}</td><td class="${cls(p.unrealized_pl)}">${money(p.unrealized_pl)}</td>
+        <td class="${cls(plpc)}">${pct(plpc)}</td></tr>`;
+    }).join('');
+  } catch(e) {}
+}
+
+async function fetchSignals() {
+  try {
+    let r = await fetch('/api/signals'); let d = await r.json(); let sigs = d.signals||[];
+    if (!sigs.length) { $('sig-tbody').innerHTML=''; $('no-sig').style.display='block'; return; }
+    $('no-sig').style.display='none';
+    $('sig-tbody').innerHTML = sigs.slice(0,15).map(s => {
+      let sc = s.raw_score||s.score||0;
+      let badge = sc>=70?'badge-green':sc>=50?'badge-yellow':'badge-gray';
+      return `<tr><td>${timeAgo(s.timestamp||s.created_at)}</td><td><b>${s.symbol||s.pair||''}</b></td>
+        <td><span class="badge ${badge}">${sc.toFixed?sc.toFixed(0):sc}</span></td>
+        <td>${s.direction||'--'}</td><td>${s.decision||'--'}</td>
+        <td style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(s.ai_rationale||s.reasoning||'').substring(0,60)}</td></tr>`;
+    }).join('');
+  } catch(e) {}
+}
+
+async function fetchOrders() {
+  try {
+    let r = await fetch('/api/orders'); let d = await r.json(); let ords = d.orders||[];
+    if (!ords.length) { $('ord-tbody').innerHTML=''; $('no-ord').style.display='block'; return; }
+    $('no-ord').style.display='none';
+    $('ord-tbody').innerHTML = ords.slice(0,15).map(o => {
+      let sc = o.side==='buy'?'positive':'negative';
+      let st = o.status==='filled'?'badge-green':o.status==='new'?'badge-blue':'badge-gray';
+      return `<tr><td><b>${o.symbol}</b></td><td class="${sc}">${o.side.toUpperCase()}</td>
+        <td>${parseFloat(o.filled_qty||o.qty||0).toFixed(4)}</td>
+        <td>${o.filled_avg_price?fmtPrice(o.filled_avg_price):'--'}</td>
+        <td><span class="badge ${st}">${o.status}</span></td>
+        <td>${timeAgo(o.submitted_at)}</td></tr>`;
+    }).join('');
+  } catch(e) {}
+}
+
+async function fetchPerf() {
+  try {
+    let r = await fetch('/api/performance'); let d = await r.json();
+    let p30 = d['30d']||{}; let p7 = d['7d']||{};
+    $('perf-grid').innerHTML = `
+      <div><div class="label">30d Trades</div><div class="metric-value" style="font-size:20px">${p30.total||0}</div></div>
+      <div><div class="label">30d Win Rate</div><div class="metric-value ${(p30.win_rate||0)>=55?'positive':'negative'}" style="font-size:20px">${(p30.win_rate||0).toFixed(1)}%</div></div>
+      <div><div class="label">30d P&L</div><div class="metric-value ${cls(p30.total_pnl)}" style="font-size:20px">${money(p30.total_pnl)}</div></div>`;
+  } catch(e) {}
+}
+
+async function refreshAll() {
+  await Promise.all([fetchStatus(), fetchPrices(), fetchPositions(), fetchSignals(), fetchOrders(), fetchPerf()]);
+}
+refreshAll();
+setInterval(refreshAll, 30000);
+</script>
+</body>
+</html>
