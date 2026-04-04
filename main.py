@@ -23,6 +23,7 @@ from agents.ai_analyst_agent import AIAnalystAgent
 from agents.risk_agent import RiskAgent
 from agents.execution_agent import ExecutionAgent
 from agents.monitor_agent import MonitorAgent
+from agents.learning_agent import LearningAgent
 from agents.scoring import SignalScorer
 from db.repository import Repository
 from dashboard.app import app as dashboard_app
@@ -56,6 +57,7 @@ class SignalForgeOrchestrator:
         self.risk = RiskAgent(self.bus, settings.database_path, settings.portfolio_value)
         self.execution = ExecutionAgent(self.bus, config)
         self.monitor = MonitorAgent(self.bus, settings.database_path)
+        self.learning = LearningAgent(self.bus, settings.database_path)
 
         # Orchestrator state for bundle assembly
         self._market_states: dict = {}

@@ -73,9 +73,15 @@ async def orders():
 
 @router.get("/performance")
 async def performance():
+    from agents.learning_agent import LearningAgent
+    from agents.event_bus import EventBus
+    learner = LearningAgent(EventBus(), settings.database_path)
     return {
         "30d": repo.get_performance_stats(30),
         "7d": repo.get_performance_stats(7),
+        "report_7d": learner.generate_performance_report(7),
+        "report_30d": learner.generate_performance_report(30),
+        "weights": learner.get_weights(),
     }
 
 
