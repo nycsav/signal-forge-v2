@@ -2,6 +2,7 @@
 
 from fastapi import APIRouter
 from datetime import datetime
+from pathlib import Path
 from config.settings import settings
 from data.alpaca_client import AlpacaClient
 from data import coinbase_client, fear_greed_client, altfins_client
@@ -93,3 +94,15 @@ async def events(limit: int = 50):
 @router.get("/trades")
 async def trades(limit: int = 50):
     return {"trades": repo.get_recent_trades(limit)}
+
+
+@router.get("/backtest/{symbol}")
+async def run_backtest_api(symbol: str, days: int = 30):
+    """Run a backtest for a symbol. Returns performance metrics."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from scripts.backtest import fetch_ohlc, run_backtest
+    candles = fetch_ohlc(symbol, days)
+    if not candles:
+        return {"error": f"No data for {symbol}"}
+    return run_backtest(candles)
