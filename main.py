@@ -24,6 +24,7 @@ from agents.risk_agent import RiskAgent
 from agents.execution_agent import ExecutionAgent
 from agents.monitor_agent import MonitorAgent
 from agents.learning_agent import LearningAgent
+from agents.regime_engine import RegimeAdaptiveEngine
 from agents.scoring import SignalScorer
 from db.repository import Repository
 from dashboard.app import app as dashboard_app
@@ -58,6 +59,7 @@ class SignalForgeOrchestrator:
         self.execution = ExecutionAgent(self.bus, config)
         self.monitor = MonitorAgent(self.bus, settings.database_path)
         self.learning = LearningAgent(self.bus, settings.database_path)
+        self.regime = RegimeAdaptiveEngine(settings.database_path)
 
         # Orchestrator state for bundle assembly
         self._market_states: dict = {}
@@ -73,6 +75,18 @@ class SignalForgeOrchestrator:
 
     async def _on_market_state(self, event: MarketStateEvent):
         self._market_states[event.symbol] = event
+
+        # Update regime engine with latest market state
+        perf = self.repo.get_performance_stats(7)
+        win_rate = perf.get("win_rate", 50) / 100
+        self.regime.update(
+            fear_greed=event.fear_greed_index,
+            market_regime=event.regime,
+            avg_atr_pct=event.atr_14 / event.price if event.price > 0 and event.atr_14 > 0 else 0.03,
+            recent_win_rate=win_rate,
+            open_positions=len(self.repo.get_open_trades()),
+        )
+
         # Log to DB
         self.repo.save_snapshot(
             symbol=event.symbol,
@@ -113,6 +127,9 @@ class SignalForgeOrchestrator:
         onchain_score = self.scorer.score_onchain(bundle.on_chain) if bundle.on_chain else 50
         composite, breakdown = self.scorer.composite_score(tech_score, sent_score, onchain_score)
 
+        # Use adaptive threshold instead of fixed
+        adaptive_threshold = self.regime.params.score_threshold
+
         self.repo.log_signal(
             timestamp=market.timestamp.isoformat(),
             symbol=symbol,
@@ -121,7 +138,7 @@ class SignalForgeOrchestrator:
             score_breakdown=breakdown,
             fear_greed=market.fear_greed_index,
             market_regime=market.regime.value,
-            decision="proposed" if composite >= settings.min_signal_score else "skipped",
+            decision="proposed" if composite >= adaptive_threshold else "skipped",
         )
 
         await self.bus.publish(bundle)

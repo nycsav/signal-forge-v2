@@ -96,6 +96,59 @@ async def trades(limit: int = 50):
     return {"trades": repo.get_recent_trades(limit)}
 
 
+@router.get("/regime")
+async def regime():
+    """Current adaptive regime parameters and reasoning journal."""
+    from agents.regime_engine import RegimeAdaptiveEngine
+    from agents.events import MarketRegime
+    from data import fear_greed_client
+    engine = RegimeAdaptiveEngine(settings.database_path)
+
+    # Get current conditions
+    fg = await fear_greed_client.get_fear_greed()
+    fg_val = fg.get("value", 50)
+
+    # Get recent performance
+    perf = repo.get_performance_stats(7)
+    win_rate = perf.get("win_rate", 50) / 100
+    positions = await alpaca.get_positions()
+
+    # Update engine
+    engine.update(
+        fear_greed=fg_val,
+        market_regime=MarketRegime.BEAR_TREND if fg_val < 30 else MarketRegime.RANGING,
+        recent_win_rate=win_rate,
+        open_positions=len(positions),
+    )
+
+    data = engine.get_dashboard_data()
+
+    # Add journal of recent events
+    events = repo.get_recent_events(20)
+    regime_events = [e for e in events if e.get("agent_name") == "regime_engine"]
+    data["journal"] = regime_events
+
+    return data
+
+
+@router.get("/journal")
+async def journal(limit: int = 50):
+    """Full system journal — all agent events with timestamps."""
+    events = repo.get_recent_events(limit)
+    # Group by agent
+    by_agent = {}
+    for e in events:
+        agent = e.get("agent_name", "unknown")
+        if agent not in by_agent:
+            by_agent[agent] = []
+        by_agent[agent].append(e)
+    return {
+        "total_events": len(events),
+        "events": events,
+        "by_agent": {k: len(v) for k, v in by_agent.items()},
+    }
+
+
 @router.get("/backtest/{symbol}")
 async def run_backtest_api(symbol: str, days: int = 30):
     """Run a backtest for a symbol. Returns performance metrics."""
