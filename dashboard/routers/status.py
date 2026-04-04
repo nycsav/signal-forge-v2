@@ -10,8 +10,8 @@ from db.repository import Repository
 router = APIRouter()
 repo = Repository(settings.database_path)
 alpaca = AlpacaClient(
-    api_key=settings.alpaca_api_key or settings.alpaca_api_secret,  # handle both .env key names
-    api_secret=settings.alpaca_api_secret or settings.alpaca_secret_key,
+    api_key=settings.alpaca_api_key,
+    api_secret=settings.alpaca_secret_key or settings.alpaca_api_secret,
     base_url=settings.alpaca_base_url,
 )
 

@@ -1,5 +1,6 @@
 """Coinbase Advanced API client — price data, no auth needed for public endpoints."""
 
+import asyncio
 import httpx
 from loguru import logger
 
@@ -19,16 +20,18 @@ async def get_price(symbol: str) -> float:
 
 
 async def get_all_prices(symbols: list[str]) -> dict[str, float]:
-    """Fetch prices for all symbols concurrently."""
-    import asyncio
+    """Fetch prices for all symbols with rate-limit-safe batching."""
     results = {}
     async with httpx.AsyncClient(timeout=10) as client:
-        tasks = []
-        for sym in symbols:
-            tasks.append(_fetch_one(client, sym))
-        prices = await asyncio.gather(*tasks)
-        for sym, price in zip(symbols, prices):
-            results[sym] = price
+        # Batch in groups of 5 with small delay to avoid rate limits
+        for i in range(0, len(symbols), 5):
+            batch = symbols[i:i+5]
+            tasks = [_fetch_one(client, sym) for sym in batch]
+            prices = await asyncio.gather(*tasks)
+            for sym, price in zip(batch, prices):
+                results[sym] = price
+            if i + 5 < len(symbols):
+                await asyncio.sleep(0.3)
     return results
 
 
