@@ -7,10 +7,21 @@ using talipp incremental indicators. Emits TechnicalEvent.
 import math
 from datetime import datetime
 from loguru import logger
+import httpx
 
 from agents.event_bus import EventBus
 from agents.events import MarketStateEvent, TechnicalEvent
 from talipp.indicators import EMA, SMA, RSI, BB, MACD, ATR
+
+COINGECKO_IDS = {
+    "BTC-USD": "bitcoin", "ETH-USD": "ethereum", "SOL-USD": "solana",
+    "XRP-USD": "ripple", "ADA-USD": "cardano", "AVAX-USD": "avalanche-2",
+    "DOGE-USD": "dogecoin", "DOT-USD": "polkadot", "LINK-USD": "chainlink",
+    "UNI-USD": "uniswap", "ATOM-USD": "cosmos", "LTC-USD": "litecoin",
+    "NEAR-USD": "near", "APT-USD": "aptos", "ARB-USD": "arbitrum",
+    "OP-USD": "optimism", "FIL-USD": "filecoin", "INJ-USD": "injective-protocol",
+    "SUI-USD": "sui",
+}
 
 
 class TechnicalAgent:
@@ -18,6 +29,48 @@ class TechnicalAgent:
         self.bus = event_bus
         self._indicators: dict[str, dict] = {}
         self.bus.subscribe(MarketStateEvent, self._on_market_state)
+
+    async def warmup(self, symbols: list[str]):
+        """Seed indicators with historical OHLC from CoinGecko so we emit signals immediately."""
+        import time
+        warmed = 0
+        for symbol in symbols:
+            coin_id = COINGECKO_IDS.get(symbol)
+            if not coin_id:
+                continue
+            try:
+                r = httpx.get(
+                    f"https://api.coingecko.com/api/v3/coins/{coin_id}/ohlc",
+                    params={"vs_currency": "usd", "days": 14},
+                    timeout=15,
+                )
+                if r.status_code == 200:
+                    ohlc = r.json()
+                    self._init_symbol(symbol)
+                    ind = self._indicators[symbol]
+                    for candle in ohlc:
+                        if len(candle) >= 5:
+                            close = candle[4]
+                            ind["ema_9"].add(close)
+                            ind["ema_21"].add(close)
+                            ind["ema_55"].add(close)
+                            ind["sma_20"].add(close)
+                            ind["rsi_14"].add(close)
+                            ind["bb"].add(close)
+                            ind["macd"].add(close)
+                            ind["closes"].append(close)
+                            ind["count"] += 1
+                    if len(ind["closes"]) > 500:
+                        ind["closes"] = ind["closes"][-500:]
+                    warmed += 1
+                    logger.info(f"Warmed up {symbol}: {ind['count']} candles")
+                elif r.status_code == 429:
+                    logger.warning("CoinGecko rate limited, pausing warmup")
+                    break
+                time.sleep(2.5)  # Rate limit
+            except Exception as e:
+                logger.error(f"Warmup failed {symbol}: {e}")
+        logger.info(f"Technical warmup complete: {warmed}/{len(symbols)} symbols ready")
 
     def _init_symbol(self, symbol: str):
         if symbol in self._indicators:

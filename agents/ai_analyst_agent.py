@@ -96,11 +96,11 @@ class AIAnalystAgent:
             stop_distance=stop_distance,
         )
 
-        # Call DeepSeek R1, fallback to Llama 3.2
-        response = await self._call_ollama(self.primary_model, prompt, timeout=90)
+        # Use Llama 3.2 for fast initial scoring, DeepSeek R1 for high-conviction review
+        response = await self._call_ollama(self.fast_model, prompt, timeout=45)
         if response is None:
-            logger.warning(f"DeepSeek timeout for {symbol}, falling back to {self.fast_model}")
-            response = await self._call_ollama(self.fast_model, prompt, timeout=30)
+            logger.warning(f"Llama timeout for {symbol}, trying DeepSeek R1")
+            response = await self._call_ollama(self.primary_model, prompt, timeout=120)
 
         if response is None:
             logger.error(f"AI Analyst: both models failed for {symbol}")
@@ -123,8 +123,12 @@ class AIAnalystAgent:
         except ValueError:
             direction = Direction.FLAT
 
-        if direction == Direction.FLAT or final_score < self.scorer.weights["thresholds"]["min_score_to_propose"]:
-            logger.info(f"AI Analyst: {symbol} score={final_score:.0f} direction={direction_str} — below threshold, skipping")
+        # Use adaptive threshold if available (from regime engine), fallback to config
+        adaptive_threshold = getattr(self, '_adaptive_threshold', None)
+        threshold = adaptive_threshold or self.scorer.weights["thresholds"]["min_score_to_propose"]
+
+        if direction == Direction.FLAT or final_score < threshold:
+            logger.info(f"AI Analyst: {symbol} score={final_score:.0f} direction={direction_str} — below threshold ({threshold}), skipping")
             return
 
         proposal = TradeProposal(

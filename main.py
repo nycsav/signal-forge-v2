@@ -141,6 +141,12 @@ class SignalForgeOrchestrator:
             decision="proposed" if composite >= adaptive_threshold else "skipped",
         )
 
+        # Pass adaptive parameters to agents
+        self.ai_analyst._adaptive_threshold = self.regime.params.score_threshold
+        self.risk.MIN_SIGNAL_SCORE = self.regime.params.score_threshold
+        self.risk.MIN_AI_CONFIDENCE = self.regime.params.ai_confidence_min
+        self.risk.MAX_OPEN_POSITIONS = self.regime.params.max_positions
+
         await self.bus.publish(bundle)
 
         # Clear consumed states to avoid re-processing
@@ -152,6 +158,11 @@ class SignalForgeOrchestrator:
         logger.info(f"Mode: {settings.mode} | Watchlist: {len(settings.watchlist)} coins")
         logger.info(f"Ollama: {settings.ollama_host} | Models: {settings.deepseek_model}, {settings.fast_model}")
         logger.info(f"Dashboard: http://localhost:{settings.dashboard_port}")
+
+        # Warm up technical indicators with historical data
+        logger.info("Warming up technical indicators...")
+        await self.technical.warmup(settings.watchlist[:8])  # Top 8 coins to avoid rate limits
+        logger.info("Technical warmup complete — indicators ready for immediate signals")
 
         # Start event bus
         bus_task = asyncio.create_task(self.bus.run())
