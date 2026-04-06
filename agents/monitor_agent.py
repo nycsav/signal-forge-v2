@@ -52,17 +52,85 @@ class MonitorAgent:
             await asyncio.sleep(interval_seconds)
 
     async def _evaluate_all_positions(self):
-        positions = self.repo.get_all_positions()
-        if not positions:
+        # Pull live positions from Alpaca (source of truth), not just DB
+        import httpx as _httpx
+        alpaca_positions = []
+        try:
+            async with _httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(
+                    f"{self.alpaca_base}/v2/positions",
+                    headers={"APCA-API-KEY-ID": self.alpaca_key, "APCA-API-SECRET-KEY": self.alpaca_secret},
+                )
+                if r.status_code == 200:
+                    for p in r.json():
+                        raw_sym = p.get("symbol", "")
+                        # BTCUSD → BTC-USD for Coinbase lookups
+                        if raw_sym.endswith("USD") and "-" not in raw_sym and "/" not in raw_sym:
+                            norm_sym = raw_sym[:-3] + "-USD"
+                        else:
+                            norm_sym = raw_sym
+                        entry = float(p.get("avg_entry_price", 0))
+                        atr_est = entry * 0.03
+                        alpaca_positions.append({
+                            "symbol": norm_sym,
+                            "alpaca_symbol": raw_sym,
+                            "entry_price": entry,
+                            "current_price": float(p.get("current_price", 0)),
+                            "quantity": float(p.get("qty", 0)),
+                            "unrealized_plpc": float(p.get("unrealized_plpc", 0)),
+                            "stop_price": entry - atr_est * 2.5,
+                            "tp1_price": entry + atr_est * 3.75,
+                            "tp2_price": entry + atr_est * 7.5,
+                            "tp3_price": entry + atr_est * 12.5,
+                            "hwm": float(p.get("current_price", 0)),
+                            "trailing_active": 0,
+                            "tp1_hit": 0,
+                            "tp2_hit": 0,
+                            "direction": "long",
+                            "opened_at": datetime.now().isoformat(),
+                        })
+        except Exception as e:
+            logger.error(f"Monitor: failed to fetch Alpaca positions: {e}")
             return
 
-        for pos in positions:
+        if not alpaca_positions:
+            return
+
+        # Merge with DB state (for stop/TP tracking) — skip DB if locked
+        try:
+            db_positions = {p["symbol"]: p for p in self.repo.get_all_positions()}
+        except Exception:
+            db_positions = {}
+
+        for pos in alpaca_positions:
             symbol = pos["symbol"]
+            # Use DB state if we have it, otherwise use Alpaca defaults
+            if symbol in db_positions:
+                db_pos = db_positions[symbol]
+                pos["stop_price"] = db_pos.get("stop_price") or pos["stop_price"]
+                pos["tp1_price"] = db_pos.get("tp1_price", 0)
+                pos["tp2_price"] = db_pos.get("tp2_price", 0)
+                pos["tp3_price"] = db_pos.get("tp3_price", 0)
+                pos["hwm"] = db_pos.get("hwm", 0)
+                pos["trailing_active"] = db_pos.get("trailing_active", 0)
+                pos["tp1_hit"] = db_pos.get("tp1_hit", 0)
+                pos["tp2_hit"] = db_pos.get("tp2_hit", 0)
+                pos["opened_at"] = db_pos.get("opened_at") or pos["opened_at"]
+            else:
+                # Calculate exit levels from entry
+                entry = pos["entry_price"]
+                atr = entry * 0.03
+                pos["stop_price"] = entry - atr * 2.5
+                pos["tp1_price"] = entry + atr * 3.75
+                pos["tp2_price"] = entry + atr * 7.5
+                pos["tp3_price"] = entry + atr * 12.5
+                pos["hwm"] = pos["current_price"]
+                pos["trailing_active"] = 0
+                pos["tp1_hit"] = 0
+                pos["tp2_hit"] = 0
+
             try:
-                current_price = await self._get_current_price(symbol)
-                if current_price <= 0:
-                    continue
-                await self._evaluate_exits(pos, current_price)
+                await self._evaluate_exits(pos, pos["current_price"])
             except Exception as e:
                 logger.error(f"Monitor eval error for {symbol}: {e}")
 
@@ -81,8 +149,17 @@ class MonitorAgent:
         # Update high water mark (highest CLOSE, not wicks)
         if current_price > hwm:
             hwm = current_price
-            self.repo.upsert_position(symbol, hwm=hwm, current_price=current_price,
-                                       last_checked=datetime.now().isoformat())
+            try:
+                self.repo.upsert_position(symbol,
+                    direction=pos.get("direction", "long"),
+                    entry_price=pos.get("entry_price", current_price),
+                    stop_price=pos.get("stop_price", current_price * 0.925),
+                    quantity=pos.get("quantity", 0),
+                    hwm=hwm, current_price=current_price,
+                    opened_at=pos.get("opened_at", datetime.now().isoformat()),
+                    last_checked=datetime.now().isoformat())
+            except Exception:
+                pass
 
         pnl_pct = (current_price - entry) / entry if is_long else (entry - current_price) / entry
 
@@ -143,9 +220,18 @@ class MonitorAgent:
             await self._execute_exit(pos, "flat_48h", current_price)
             return
 
-        # Update current price in DB
-        self.repo.upsert_position(symbol, current_price=current_price,
-                                   last_checked=datetime.now().isoformat())
+        # Update current price in DB (include required fields to avoid NOT NULL errors)
+        try:
+            self.repo.upsert_position(symbol,
+                direction=pos.get("direction", "long"),
+                entry_price=pos.get("entry_price", current_price),
+                stop_price=pos.get("stop_price", current_price * 0.925),
+                quantity=pos.get("quantity", 0),
+                current_price=current_price,
+                opened_at=pos.get("opened_at", datetime.now().isoformat()),
+                last_checked=datetime.now().isoformat())
+        except Exception:
+            pass
 
     async def _execute_exit(self, pos: dict, reason: str, price: float):
         symbol = pos["symbol"]
@@ -162,8 +248,8 @@ class MonitorAgent:
 
         logger.info(f"Monitor EXIT: {symbol} reason={reason} P&L={pnl_pct:+.2%} (${pnl_usd:+,.2f}) hold={hold_hours:.1f}h")
 
-        # Close on Alpaca
-        alpaca_symbol = symbol.replace("-", "/")
+        # Close on Alpaca — use raw symbol (BTCUSD) or slash format (BTC/USD)
+        alpaca_symbol = pos.get("alpaca_symbol") or symbol.replace("-", "/")
         await self._close_alpaca_position(alpaca_symbol)
 
         # Update DB

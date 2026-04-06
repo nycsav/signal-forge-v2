@@ -163,7 +163,7 @@ class RegimeAdaptiveEngine:
         # ── Step 4: Adapt position sizing ──
         if regime in ("capitulation", "extreme_fear"):
             position_size_mult = 0.5  # Small positions in fear (scale in gradually)
-            max_positions = 6         # Allow more positions to diversify entries
+            max_positions = 15        # Allow many positions for gradual accumulation in fear
         elif regime == "fear":
             position_size_mult = 0.75
             max_positions = 5
