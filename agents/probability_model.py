@@ -12,16 +12,19 @@ def calculate_probability_scenario() -> dict:
     """Calculate realistic probability improvements from each data source and fix."""
 
     # ── Baseline: Current System Performance ──
-    # Based on our 4 days of paper trading data
+    # Based on 4 days paper trading + research validation
+    # Alpha Arena 2025: Best LLM (Qwen3) only 30% win rate live
+    # Our 100% win rate is sample bias — realistic regression expected
     baseline = {
         "name": "Current System (v2 baseline)",
-        "win_rate": 100.0,  # 20/20 but small sample, likely regresses to ~55-60%
-        "realistic_win_rate": 58.0,  # Conservative estimate for sustained trading
-        "sharpe_ratio": 1.2,  # Estimated from 2.7% return in 4 days
-        "max_drawdown_pct": 0,  # No drawdowns yet (all winners)
-        "realistic_max_dd": 12.0,  # Expected when market turns
+        "paper_win_rate": 100.0,  # 20/20 but tiny sample
+        "realistic_win_rate": 52.0,  # Conservative: TA-only systems get 45-55% per research
+        "sharpe_ratio": 0.8,  # Realistic for TA-only per SSRN crypto alpha paper
+        "max_drawdown_pct": 0,  # No drawdowns yet
+        "realistic_max_dd": 25.0,  # TA-only systems: 25-40% per backtests
         "avg_trade_pnl_pct": 3.5,
-        "trades_per_month": 30,  # Estimate based on 38 trades in 4 days
+        "trades_per_month": 30,
+        "research_note": "Alpha Arena 2025: best LLM achieved Sharpe 0.36, 30% win rate. Professional quant funds: Sharpe 2.51 avg. Our current system is TA + LLM without sentiment/on-chain.",
     }
 
     # ── Improvement Layers (research-validated) ──
@@ -144,10 +147,12 @@ def calculate_probability_scenario() -> dict:
         cumulative_sharpe += i["sharpe_delta"]
         cumulative_dd -= i["drawdown_reduction"]
 
-    # Cap at realistic limits
-    cumulative_wr = min(75, cumulative_wr)  # No strategy beats 75% long-term
-    cumulative_sharpe = min(3.5, cumulative_sharpe)  # Top quant funds: 2-3 Sharpe
-    cumulative_dd = max(3, cumulative_dd)  # Can't eliminate all drawdowns
+    # Cap at research-validated limits
+    # Top quant crypto funds: Sharpe 2.51, win rate 63-65%, DD 10-15%
+    # Alpha Arena best: Sharpe 0.36 (single LLM), research multi-agent: Sharpe 2.87
+    cumulative_wr = min(68, cumulative_wr)  # Professional ceiling ~65-68%
+    cumulative_sharpe = min(2.5, cumulative_sharpe)  # Top quant fund avg
+    cumulative_dd = max(8, cumulative_dd)  # Best funds still have 10-15% DD
 
     # ── Probability Scenarios ──
     scenarios = {
@@ -179,14 +184,16 @@ def calculate_probability_scenario() -> dict:
 
     # ── Research References ──
     references = [
-        "arXiv 2501.00826: Multi-agent crypto framework, +25% with sentiment, Sharpe 2.87",
-        "FinAI Contest 2025: Winner Sharpe 2.07 using multi-factor + news sentiment",
-        "StratBase: ATR(14)×2.5 trailing stop: +320% return, -25% max DD, 42% win rate on BTC 2019-2025",
-        "QuantifiedStrategies: RSI(14) oversold + EMA bullish: 79.4% win rate",
-        "MacroHFT (arXiv 2406.14537): Multi-agent hierarchy outperforms single-agent by 15-30%",
-        "MARL framework (JAPMI 2024): Sharpe 2.87, max DD 12.3% using MAPPO on HFT data",
-        "Coinbase Advanced API: Free public candles + WebSocket, bracket orders with TP+SL",
-        "altFINS: 150+ indicators, pattern recognition, institutional-grade screener",
+        {"source": "Alpha Arena 2025 (live trading)", "finding": "Best LLM (Qwen3): +22.3% return, 30% win rate, Sharpe 0.33. DeepSeek V3.1: Sharpe 0.36. Over-trading destroyed returns (Gemini: -56.7%, 13% fees)."},
+        {"source": "arXiv 2501.00826", "finding": "Multi-agent crypto framework: +25% improvement with sentiment, Sharpe 2.87 on backtest"},
+        {"source": "ACM ML-Driven Ethereum Model", "finding": "Multi-factor (TA+sentiment+on-chain): 97% annual return, Sharpe 2.5, 18% max DD"},
+        {"source": "ScienceDirect On-Chain CNN-LSTM", "finding": "On-chain data: 82.03% directional accuracy for BTC. Higher predictive power than technicals alone."},
+        {"source": "Crypto Fund Research Q4 2025", "finding": "Algorithmic quant funds: avg Sharpe 2.51, 48% annual return. Industry avg Sharpe: 1.6"},
+        {"source": "StratBase ATR Backtest", "finding": "ATR(14)×2.5 trailing stop: +320% return, -25% max DD, 42% win rate on BTC daily 2019-2025"},
+        {"source": "altFINS Chart Patterns", "finding": "Channel Down breakout: 73%, Ascending Triangle: 67-86%, Inverse H&S: 67-86% success rate"},
+        {"source": "CoinMarketCap Kelly Study", "finding": "Full Kelly: 80% chance of 20% DD. Quarter-Kelly recommended for crypto. Cap position at 1% for volatile assets."},
+        {"source": "Coinbase Advanced API", "finding": "Free OHLCV candles (no auth), WebSocket real-time, bracket orders with TP+SL. 10 req/s public."},
+        {"source": "altFINS MCP Server", "finding": "Production MCP at mcp.altfins.com/mcp. 12 tools. Raw RSI/MACD/BB values. $39/mo Hobbyist tier."},
     ]
 
     return {
@@ -203,5 +210,12 @@ def calculate_probability_scenario() -> dict:
         "total_upgrades": len(improvements),
         "total_cost_monthly": "$31-195 (mostly optional)",
         "free_improvements": sum(1 for i in improvements if "$0" in i["cost"]),
+        "position_sizing_recommendation": {
+            "current": "Half-Kelly (2% max per trade)",
+            "recommended": "Quarter-Kelly (1% max per trade)",
+            "reasoning": "Research shows full Kelly has 80% chance of 20% drawdown. Quarter-Kelly captures 50% of optimal growth with 75% less drawdown. Professional crypto funds use quarter-Kelly or lower.",
+            "source": "CoinMarketCap Kelly study, QuantConnect Kelly analysis",
+        },
+        "key_warning": "Alpha Arena 2025 showed LLMs struggle at live trading (best: 30% win rate). Our 100% win rate is paper trading in a favorable regime (capitulation bounce). Expect regression to 55-65% in mixed conditions.",
         "references": references,
     }
