@@ -18,39 +18,9 @@ from agents.events import SignalBundle, TradeProposal, Direction
 from agents.scoring import SignalScorer
 
 
-ANALYST_PROMPT = """You are a quantitative crypto trading analyst for Signal Forge v2.
-Analyze this signal bundle and return a JSON trade decision.
+ANALYST_PROMPT = """{symbol} ${price:,.0f} RSI={rsi:.0f} F&G={fear_greed} EMA={ema_aligned} MACD={macd_hist:+.3f} BB={bb_pos:.1f} Vol={vol_ratio:.1f}x Score={pre_score:.0f}/100
 
-SYMBOL: {symbol}
-PRICE: ${price:,.2f}
-MARKET REGIME: {regime}
-
-TECHNICAL INDICATORS:
-- RSI(14): {rsi} ({rsi_trend})
-- MACD histogram: {macd_hist:+.4f}
-- Bollinger position: {bb_pos:.2f} (0=lower, 1=upper){bb_squeeze}
-- EMA alignment (9>21>55): {ema_aligned}
-- Volume ratio: {vol_ratio:.1f}x
-- Ichimoku: {ichimoku}
-- Timeframe consensus: {tf_consensus}
-
-SENTIMENT:
-- Fear & Greed: {fear_greed}/100
-- altFINS signal: {altfins_score:+.2f}
-
-COMPOSITE SCORE (pre-AI): {pre_score}/100
-Score breakdown: {score_breakdown}
-
-RULES:
-1. If composite < 40, lean toward SKIP
-2. If F&G < 20 and technicals are oversold (RSI < 30), consider contrarian LONG
-3. If F&G > 80 and RSI > 70, consider SHORT or SKIP
-4. Entry should be near current price
-5. Stop loss = entry - 1.5 * ATR (approximately {stop_distance:.2f} below entry)
-6. TP1 = +1.5R, TP2 = +3R, TP3 = +5R from entry
-
-Return ONLY this JSON (no markdown, no explanation outside JSON):
-{{"direction": "long" or "short" or "flat", "score": 0-100, "ai_confidence": 0.0-1.0, "rationale": "2 sentences max", "entry_price": {price}, "stop_price": <number>, "tp1_price": <number>, "tp2_price": <number>, "tp3_price": <number>, "score_breakdown": {{}}, "key_risk": "1 sentence"}}"""
+JSON only: {{"direction":"long/short/flat","score":0-100,"ai_confidence":0.0-1.0,"rationale":"one sentence"}}"""
 
 
 class AIAnalystAgent:
@@ -74,26 +44,18 @@ class AIAnalystAgent:
         onchain_score = self.scorer.score_onchain(bundle.on_chain) if bundle.on_chain else 50
         pre_score, breakdown = self.scorer.composite_score(tech_score, sent_score, onchain_score)
 
-        # Build prompt
+        # Build concise prompt (Qwen3 works best with short, focused input)
         stop_distance = market.price * tech.atr_14_pct * 1.5 if tech.atr_14_pct > 0 else market.price * 0.03
         prompt = ANALYST_PROMPT.format(
             symbol=symbol,
             price=market.price,
-            regime=market.regime.value,
             rsi=tech.rsi_14,
-            rsi_trend=tech.rsi_trend,
+            fear_greed=sent.fear_greed if sent else market.fear_greed_index,
+            ema_aligned="YES" if tech.ema_alignment else "NO",
             macd_hist=tech.macd_histogram,
             bb_pos=tech.bb_position,
-            bb_squeeze=" [SQUEEZE]" if tech.bb_squeeze else "",
-            ema_aligned="YES" if tech.ema_alignment else "NO",
             vol_ratio=tech.volume_ratio,
-            ichimoku=tech.ichimoku_signal,
-            tf_consensus=json.dumps(tech.timeframe_consensus),
-            fear_greed=sent.fear_greed if sent else market.fear_greed_index,
-            altfins_score=market.altfins_signal_score,
             pre_score=pre_score,
-            score_breakdown=json.dumps(breakdown),
-            stop_distance=stop_distance,
         )
 
         # Use Qwen3 14B as primary (Alpha Arena winner), Llama 3.2 as fast fallback
@@ -165,23 +127,20 @@ class AIAnalystAgent:
         await self.bus.publish(proposal)
 
     async def _call_ollama(self, model: str, prompt: str, timeout: int = 90) -> str | None:
-        """Call Ollama using chat endpoint (works better with Qwen3)."""
+        """Call Ollama generate endpoint. Qwen3 needs num_predict=2000 for thinking + output."""
         async with httpx.AsyncClient(timeout=timeout) as client:
             try:
                 r = await client.post(
-                    f"{self.ollama_host}/api/chat",
+                    f"{self.ollama_host}/api/generate",
                     json={
                         "model": model,
-                        "messages": [
-                            {"role": "system", "content": "You are a JSON-only crypto trading analyst. Always respond with valid JSON. No thinking tags, no markdown, no explanation — just the JSON object."},
-                            {"role": "user", "content": prompt},
-                        ],
+                        "prompt": prompt,
                         "stream": False,
-                        "options": {"temperature": 0.1, "num_predict": 600},
+                        "options": {"temperature": 0.1, "num_predict": 2000},
                     },
                 )
                 if r.status_code == 200:
-                    return r.json().get("message", {}).get("content", "")
+                    return r.json().get("response", "")
             except httpx.TimeoutException:
                 logger.warning(f"Ollama timeout ({model}, {timeout}s)")
             except Exception as e:
