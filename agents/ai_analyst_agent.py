@@ -131,6 +131,16 @@ class AIAnalystAgent:
             logger.info(f"AI Analyst: {symbol} score={final_score:.0f} direction={direction_str} — below threshold ({threshold}), skipping")
             return
 
+        # OVERRIDE AI stop/TP with ATR-based levels (spec Section 5.2)
+        # AI suggestions are unreliable — enforce ATR×2.5 stop, 1.5R/3R/5R TPs
+        entry = market.price
+        atr = entry * tech.atr_14_pct if tech.atr_14_pct > 0 else entry * 0.03
+        risk = atr * 2.5  # ATR×2.5 stop distance
+        forced_stop = entry - risk
+        forced_tp1 = entry + risk * 1.5   # +1.5R
+        forced_tp2 = entry + risk * 3.0   # +3R
+        forced_tp3 = entry + risk * 5.0   # +5R
+
         proposal = TradeProposal(
             timestamp=datetime.now(),
             proposal_id=str(uuid.uuid4()),
@@ -139,11 +149,11 @@ class AIAnalystAgent:
             raw_score=final_score,
             ai_confidence=parsed.get("ai_confidence", 0.5),
             ai_rationale=parsed.get("rationale", "")[:500],
-            suggested_entry=parsed.get("entry_price", market.price),
-            suggested_stop=parsed.get("stop_price", market.price - stop_distance),
-            suggested_tp1=parsed.get("tp1_price", market.price + stop_distance * 1.5),
-            suggested_tp2=parsed.get("tp2_price", market.price + stop_distance * 3),
-            suggested_tp3=parsed.get("tp3_price", market.price + stop_distance * 5),
+            suggested_entry=entry,
+            suggested_stop=forced_stop,
+            suggested_tp1=forced_tp1,
+            suggested_tp2=forced_tp2,
+            suggested_tp3=forced_tp3,
             score_breakdown=final_breakdown,
         )
 

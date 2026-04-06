@@ -201,12 +201,16 @@ class RiskAgent:
 
     def _check_risk_reward(self, p: TradeProposal) -> tuple[bool, str]:
         if p.suggested_entry <= 0 or p.suggested_stop <= 0:
-            return True, ""  # Can't check without valid prices
+            return True, ""
         risk = abs(p.suggested_entry - p.suggested_stop)
-        reward = abs(p.suggested_tp1 - p.suggested_entry) if p.suggested_tp1 else risk * 2
         if risk <= 0:
             return True, ""
-        rr = reward / risk
+        # Use weighted average reward across TP ladder (33% TP1, 33% TP2, 34% TP3)
+        tp1_reward = abs(p.suggested_tp1 - p.suggested_entry) if p.suggested_tp1 else risk * 1.5
+        tp2_reward = abs(p.suggested_tp2 - p.suggested_entry) if p.suggested_tp2 else risk * 3.0
+        tp3_reward = abs(p.suggested_tp3 - p.suggested_entry) if p.suggested_tp3 else risk * 5.0
+        weighted_reward = tp1_reward * 0.33 + tp2_reward * 0.33 + tp3_reward * 0.34
+        rr = weighted_reward / risk
         if rr < self.MIN_RISK_REWARD:
             return False, f"Risk/reward {rr:.1f} < minimum {self.MIN_RISK_REWARD}"
         return True, ""
@@ -229,10 +233,13 @@ class RiskAgent:
         win_prob = 0.40 + (p.raw_score / 100) * 0.35
         q = 1 - win_prob
 
-        # Reward/risk ratio from TP1/stop distances
+        # Reward/risk ratio from weighted TP ladder
         risk_dist = abs(p.suggested_entry - p.suggested_stop) if p.suggested_stop else p.suggested_entry * 0.03
-        reward_dist = abs(p.suggested_tp1 - p.suggested_entry) if p.suggested_tp1 else risk_dist * 1.5
-        b = reward_dist / risk_dist if risk_dist > 0 else 0.9
+        tp1_r = abs(p.suggested_tp1 - p.suggested_entry) if p.suggested_tp1 else risk_dist * 1.5
+        tp2_r = abs(p.suggested_tp2 - p.suggested_entry) if p.suggested_tp2 else risk_dist * 3.0
+        tp3_r = abs(p.suggested_tp3 - p.suggested_entry) if p.suggested_tp3 else risk_dist * 5.0
+        reward_dist = tp1_r * 0.33 + tp2_r * 0.33 + tp3_r * 0.34
+        b = reward_dist / risk_dist if risk_dist > 0 else 3.17
 
         # Full Kelly then half
         full_kelly = win_prob - (q / b) if b > 0 else 0

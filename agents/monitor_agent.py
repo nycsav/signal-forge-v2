@@ -163,6 +163,18 @@ class MonitorAgent:
                 actions_taken += 1
                 continue
 
+            # ── Layer 7: Signal degradation ──
+            # Every 6th cycle (~30 min), check if market has turned against us
+            cycle_count = state.get("check_count", 0) + 1
+            state["check_count"] = cycle_count
+            if cycle_count % 6 == 0:  # Every 6 monitor cycles ≈ 30 min
+                degradation_score = self._quick_rescore(entry, current, pnl_pct, hold_hours)
+                if degradation_score < 30:
+                    logger.warning(f"Monitor SIGNAL DEGRADATION: {symbol} rescore={degradation_score:.0f} < 30")
+                    await self._close_position(pos, "signal_degradation", current)
+                    actions_taken += 1
+                    continue
+
             # Log status
             trail_status = f" TRAILING from ${state['hwm']:,.2f}" if state["trailing_active"] else ""
             tp_status = " [TP1 hit]" if state["tp1_hit"] else ""
@@ -225,6 +237,40 @@ class MonitorAgent:
                 logger.info(f"Monitor partial close: {pos['symbol']} sell {qty:.6f} ({reason})")
             except Exception as e:
                 logger.error(f"Partial close failed {pos['symbol']}: {e}")
+
+    def _quick_rescore(self, entry: float, current: float, pnl_pct: float, hold_hours: float) -> float:
+        """Quick signal re-evaluation without AI call.
+
+        Returns 0-100 score. Below 30 = signal degraded, exit.
+        Factors: price trend, hold duration, P&L trajectory.
+        """
+        score = 50.0  # neutral baseline
+
+        # Price vs entry — losing ground is bearish
+        if pnl_pct > 0.05:
+            score += 20  # +5%+ = strong
+        elif pnl_pct > 0.02:
+            score += 10  # +2%+ = decent
+        elif pnl_pct > 0:
+            score += 5   # slightly positive
+        elif pnl_pct > -0.02:
+            score -= 5   # slightly negative
+        elif pnl_pct > -0.05:
+            score -= 15  # losing 2-5%
+        else:
+            score -= 30  # losing 5%+ = very bearish
+
+        # Hold time penalty — longer holds with poor returns = stale
+        if hold_hours > 48 and pnl_pct < 0.01:
+            score -= 15  # 2 days with no returns
+        elif hold_hours > 24 and pnl_pct < 0:
+            score -= 10  # 1 day and losing
+
+        # Trend: price moving away from entry in wrong direction
+        if current < entry * 0.95:
+            score -= 20  # 5%+ below entry
+
+        return max(0, min(100, score))
 
     async def _fetch_fill_times(self) -> dict[str, str]:
         """Get the earliest fill timestamp per symbol from Alpaca orders."""
