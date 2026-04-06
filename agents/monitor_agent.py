@@ -1,43 +1,47 @@
-"""Signal Forge v2 — Monitor Agent
+"""Signal Forge v2 — Monitor Agent (Rebuilt)
 
-6-layer exit strategy evaluated every 5 minutes:
-1. Hard stop (price crosses stop)
-2. ATR trailing stop (trails from highest CLOSE after activation)
-3. Take profit 1 (+1.5R → close 33%, move stop to breakeven)
-4. Take profit 2 (+3R → close 33%)
-5. Take profit 3 (+5R → close 34%)
-6. Time exits (72h max, 48h if flat)
-7. Signal degradation (re-score < 30)
+7-layer exit strategy per spec Section 5:
+1. Hard stop: Entry - ATR×2.5
+2. ATR trailing: Trail from highest CLOSE after +1.5×ATR activation
+3. TP1 (+1.5R): Close 33%, move stop to breakeven
+4. TP2 (+3R): Close 33%
+5. TP3 (+5R): Close 34%
+6. Time exit: 72h max, 48h if flat ±0.5%
+7. Signal degradation: Exit if re-score < 30
 
-Emits TradeClosedEvent.
+Reads positions from Alpaca (source of truth). Tracks state in memory (not DB).
 """
 
 import asyncio
-from datetime import datetime, timedelta
+import json
+from datetime import datetime
 from loguru import logger
 import httpx
 
 from agents.event_bus import EventBus
 from agents.events import OrderFilledEvent, TradeClosedEvent
-from db.repository import Repository
 from config.settings import settings
-from data import coinbase_client
 
 
 class MonitorAgent:
-    MAX_HOLD_HOURS = 72
-    FLAT_EXIT_HOURS = 48
-    FLAT_THRESHOLD_PCT = 0.005  # ±0.5%
-    SIGNAL_DEGRADE_THRESHOLD = 30
+    # Exit parameters from spec Section 5
+    ATR_STOP_MULT = 2.5
     ATR_ACTIVATION_MULT = 1.5
-    ATR_TRAIL_MULT = 2.5
+    TP1_R = 1.5   # TP1 at 1.5× risk
+    TP2_R = 3.0
+    TP3_R = 5.0
+    MAX_HOLD_HOURS = 72
+    FLAT_HOURS = 48
+    FLAT_THRESHOLD = 0.005  # ±0.5%
 
     def __init__(self, event_bus: EventBus, db_path: str):
         self.bus = event_bus
-        self.repo = Repository(db_path)
         self.alpaca_key = settings.alpaca_api_key
         self.alpaca_secret = settings.alpaca_secret_key or settings.alpaca_api_secret
         self.alpaca_base = settings.alpaca_base_url
+
+        # In-memory position state (survives DB issues)
+        self._state: dict[str, dict] = {}
         self.bus.subscribe(OrderFilledEvent, self._on_order_filled)
 
     async def _on_order_filled(self, event: OrderFilledEvent):
@@ -46,237 +50,154 @@ class MonitorAgent:
     async def run_monitor_loop(self, interval_seconds: int = 300):
         while True:
             try:
-                await self._evaluate_all_positions()
+                await self._evaluate_all()
             except Exception as e:
-                logger.error(f"Monitor error: {e}")
+                logger.error(f"Monitor loop error: {e}")
             await asyncio.sleep(interval_seconds)
 
-    async def _evaluate_all_positions(self):
-        # Pull live positions from Alpaca (source of truth), not just DB
-        import httpx as _httpx
-        alpaca_positions = []
-        try:
-            async with _httpx.AsyncClient(timeout=10) as client:
-                r = await client.get(
-                    f"{self.alpaca_base}/v2/positions",
-                    headers={"APCA-API-KEY-ID": self.alpaca_key, "APCA-API-SECRET-KEY": self.alpaca_secret},
-                )
-                if r.status_code == 200:
-                    for p in r.json():
-                        raw_sym = p.get("symbol", "")
-                        # BTCUSD → BTC-USD for Coinbase lookups
-                        if raw_sym.endswith("USD") and "-" not in raw_sym and "/" not in raw_sym:
-                            norm_sym = raw_sym[:-3] + "-USD"
-                        else:
-                            norm_sym = raw_sym
-                        entry = float(p.get("avg_entry_price", 0))
-                        atr_est = entry * 0.03
-                        alpaca_positions.append({
-                            "symbol": norm_sym,
-                            "alpaca_symbol": raw_sym,
-                            "entry_price": entry,
-                            "current_price": float(p.get("current_price", 0)),
-                            "quantity": float(p.get("qty", 0)),
-                            "unrealized_plpc": float(p.get("unrealized_plpc", 0)),
-                            "stop_price": entry - atr_est * 2.5,
-                            "tp1_price": entry + atr_est * 3.75,
-                            "tp2_price": entry + atr_est * 7.5,
-                            "tp3_price": entry + atr_est * 12.5,
-                            "hwm": float(p.get("current_price", 0)),
-                            "trailing_active": 0,
-                            "tp1_hit": 0,
-                            "tp2_hit": 0,
-                            "direction": "long",
-                            "opened_at": datetime.now().isoformat(),
-                        })
-        except Exception as e:
-            logger.error(f"Monitor: failed to fetch Alpaca positions: {e}")
+    async def _evaluate_all(self):
+        positions = await self._fetch_alpaca_positions()
+        if not positions:
             return
 
-        if not alpaca_positions:
-            return
-
-        # Merge with DB state (for stop/TP tracking) — skip DB if locked
-        try:
-            db_positions = {p["symbol"]: p for p in self.repo.get_all_positions()}
-        except Exception:
-            db_positions = {}
-
-        for pos in alpaca_positions:
+        actions_taken = 0
+        for pos in positions:
             symbol = pos["symbol"]
-            # Use DB state if we have it, otherwise use Alpaca defaults
-            if symbol in db_positions:
-                db_pos = db_positions[symbol]
-                pos["stop_price"] = db_pos.get("stop_price") or pos["stop_price"]
-                pos["tp1_price"] = db_pos.get("tp1_price", 0)
-                pos["tp2_price"] = db_pos.get("tp2_price", 0)
-                pos["tp3_price"] = db_pos.get("tp3_price", 0)
-                pos["hwm"] = db_pos.get("hwm", 0)
-                pos["trailing_active"] = db_pos.get("trailing_active", 0)
-                pos["tp1_hit"] = db_pos.get("tp1_hit", 0)
-                pos["tp2_hit"] = db_pos.get("tp2_hit", 0)
-                pos["opened_at"] = db_pos.get("opened_at") or pos["opened_at"]
-            else:
-                # Calculate exit levels from entry
-                entry = pos["entry_price"]
-                atr = entry * 0.03
-                pos["stop_price"] = entry - atr * 2.5
-                pos["tp1_price"] = entry + atr * 3.75
-                pos["tp2_price"] = entry + atr * 7.5
-                pos["tp3_price"] = entry + atr * 12.5
-                pos["hwm"] = pos["current_price"]
-                pos["trailing_active"] = 0
-                pos["tp1_hit"] = 0
-                pos["tp2_hit"] = 0
+            entry = pos["entry"]
+            current = pos["current"]
+            qty = pos["qty"]
 
-            try:
-                await self._evaluate_exits(pos, pos["current_price"])
-            except Exception as e:
-                logger.error(f"Monitor eval error for {symbol}: {e}")
+            if entry <= 0 or current <= 0:
+                continue
 
-    async def _evaluate_exits(self, pos: dict, current_price: float):
+            # Get or create state
+            if symbol not in self._state:
+                self._state[symbol] = {
+                    "hwm": current,
+                    "trailing_active": False,
+                    "tp1_hit": False,
+                    "tp2_hit": False,
+                    "first_seen": datetime.now(),
+                }
+
+            state = self._state[symbol]
+
+            # Update high water mark (highest CLOSE)
+            if current > state["hwm"]:
+                state["hwm"] = current
+
+            # Calculate levels
+            atr = entry * 0.03  # ATR estimate: 3% of entry
+            risk = atr * self.ATR_STOP_MULT
+            stop = entry - risk
+            activation = entry + atr * self.ATR_ACTIVATION_MULT
+            tp1 = entry + risk * self.TP1_R
+            tp2 = entry + risk * self.TP2_R
+            tp3 = entry + risk * self.TP3_R
+
+            pnl_pct = (current - entry) / entry
+            hold_hours = (datetime.now() - state["first_seen"]).total_seconds() / 3600
+
+            # ── Layer 1: Hard Stop ──
+            if current <= stop:
+                await self._close_position(pos, "hard_stop", current)
+                actions_taken += 1
+                continue
+
+            # ── Layer 2: ATR Trailing Stop ──
+            if current >= activation:
+                state["trailing_active"] = True
+
+            if state["trailing_active"]:
+                trailing_stop = state["hwm"] - risk
+                # Trailing stop only moves up
+                if trailing_stop > stop:
+                    stop = trailing_stop
+                if current <= stop:
+                    await self._close_position(pos, "trailing_stop", current)
+                    actions_taken += 1
+                    continue
+
+            # ── Layer 3: TP1 — close 33%, move stop to breakeven ──
+            if current >= tp1 and not state["tp1_hit"]:
+                sell_qty = round(qty * 0.33, 6)
+                await self._partial_close(pos, sell_qty, "tp1")
+                state["tp1_hit"] = True
+                logger.info(f"Monitor TP1: {symbol} +{pnl_pct:.1%} — sold 33%, stop → breakeven")
+                actions_taken += 1
+
+            # ── Layer 4: TP2 — close 33% of remaining ──
+            if current >= tp2 and state["tp1_hit"] and not state["tp2_hit"]:
+                remaining = qty * 0.67  # After TP1
+                sell_qty = round(remaining * 0.5, 6)
+                await self._partial_close(pos, sell_qty, "tp2")
+                state["tp2_hit"] = True
+                logger.info(f"Monitor TP2: {symbol} +{pnl_pct:.1%} — sold 50% of remaining")
+                actions_taken += 1
+
+            # ── Layer 5: TP3 — close all remaining ──
+            if current >= tp3:
+                await self._close_position(pos, "tp3", current)
+                actions_taken += 1
+                continue
+
+            # ── Layer 6: Time exits ──
+            if hold_hours >= self.MAX_HOLD_HOURS:
+                await self._close_position(pos, "time_72h", current)
+                actions_taken += 1
+                continue
+
+            if hold_hours >= self.FLAT_HOURS and abs(pnl_pct) < self.FLAT_THRESHOLD:
+                await self._close_position(pos, "flat_48h", current)
+                actions_taken += 1
+                continue
+
+            # Log status
+            trail_status = f" TRAILING from ${state['hwm']:,.2f}" if state["trailing_active"] else ""
+            tp_status = " [TP1 hit]" if state["tp1_hit"] else ""
+            logger.debug(f"Monitor: {symbol} P&L={pnl_pct:+.2%} hold={hold_hours:.0f}h{trail_status}{tp_status}")
+
+        if actions_taken > 0:
+            logger.info(f"Monitor: {actions_taken} exit actions taken this cycle")
+
+    async def _close_position(self, pos: dict, reason: str, price: float):
         symbol = pos["symbol"]
-        entry = pos["entry_price"]
-        stop = pos["stop_price"]
-        tp1 = pos.get("tp1_price", 0)
-        tp2 = pos.get("tp2_price", 0)
-        tp3 = pos.get("tp3_price", 0)
-        hwm = pos.get("hwm", 0) or entry
-        qty = pos["quantity"]
-        direction = pos.get("direction", "long")
-        is_long = direction == "long"
-
-        # Update high water mark (highest CLOSE, not wicks)
-        if current_price > hwm:
-            hwm = current_price
-            try:
-                self.repo.upsert_position(symbol,
-                    direction=pos.get("direction", "long"),
-                    entry_price=pos.get("entry_price", current_price),
-                    stop_price=pos.get("stop_price", current_price * 0.925),
-                    quantity=pos.get("quantity", 0),
-                    hwm=hwm, current_price=current_price,
-                    opened_at=pos.get("opened_at", datetime.now().isoformat()),
-                    last_checked=datetime.now().isoformat())
-            except Exception:
-                pass
-
-        pnl_pct = (current_price - entry) / entry if is_long else (entry - current_price) / entry
-
-        # ── Layer 1: Hard Stop ──
-        if is_long and current_price <= stop:
-            await self._execute_exit(pos, "stop", current_price)
-            return
-        if not is_long and current_price >= stop:
-            await self._execute_exit(pos, "stop", current_price)
-            return
-
-        # ── Layer 2: ATR Trailing Stop ──
-        activation_price = entry * (1 + entry * pos.get("signal_score", 0) * 0.0001) if entry else 0
-        # Simple activation: price moved 1.5x the stop distance above entry
-        stop_distance = abs(entry - stop)
-        activation_level = entry + stop_distance * self.ATR_ACTIVATION_MULT / self.ATR_TRAIL_MULT if is_long else entry - stop_distance * self.ATR_ACTIVATION_MULT / self.ATR_TRAIL_MULT
-
-        if pos.get("trailing_active") or (is_long and current_price >= activation_level):
-            # Trailing active
-            new_stop = hwm - stop_distance
-            if new_stop > stop:
-                self.repo.upsert_position(symbol, stop_price=new_stop, trailing_active=1)
-                stop = new_stop
-            if is_long and current_price <= new_stop:
-                await self._execute_exit(pos, "trailing_stop", current_price)
-                return
-
-        # ── Layer 3: Take Profit 1 ──
-        if tp1 and not pos.get("tp1_hit") and is_long and current_price >= tp1:
-            await self._partial_close(pos, 0.33, current_price, "tp1")
-            # Move stop to breakeven
-            self.repo.upsert_position(symbol, tp1_hit=1, stop_price=entry)
-            logger.info(f"Monitor TP1: {symbol} +{pnl_pct:.1%}, stop → breakeven")
-
-        # ── Layer 4: Take Profit 2 ──
-        if tp2 and not pos.get("tp2_hit") and pos.get("tp1_hit") and is_long and current_price >= tp2:
-            await self._partial_close(pos, 0.33, current_price, "tp2")
-            self.repo.upsert_position(symbol, tp2_hit=1)
-            logger.info(f"Monitor TP2: {symbol} +{pnl_pct:.1%}")
-
-        # ── Layer 5: Take Profit 3 ──
-        if tp3 and is_long and current_price >= tp3:
-            await self._execute_exit(pos, "tp3", current_price)
-            return
-
-        # ── Layer 6: Time exits ──
-        try:
-            opened = datetime.fromisoformat(pos["opened_at"])
-        except (ValueError, TypeError):
-            opened = datetime.now()
-        hold_hours = (datetime.now() - opened).total_seconds() / 3600
-
-        if hold_hours >= self.MAX_HOLD_HOURS:
-            await self._execute_exit(pos, "time_72h", current_price)
-            return
-
-        if hold_hours >= self.FLAT_EXIT_HOURS and abs(pnl_pct) < self.FLAT_THRESHOLD_PCT:
-            await self._execute_exit(pos, "flat_48h", current_price)
-            return
-
-        # Update current price in DB (include required fields to avoid NOT NULL errors)
-        try:
-            self.repo.upsert_position(symbol,
-                direction=pos.get("direction", "long"),
-                entry_price=pos.get("entry_price", current_price),
-                stop_price=pos.get("stop_price", current_price * 0.925),
-                quantity=pos.get("quantity", 0),
-                current_price=current_price,
-                opened_at=pos.get("opened_at", datetime.now().isoformat()),
-                last_checked=datetime.now().isoformat())
-        except Exception:
-            pass
-
-    async def _execute_exit(self, pos: dict, reason: str, price: float):
-        symbol = pos["symbol"]
-        entry = pos["entry_price"]
-        qty = pos["quantity"]
+        alpaca_sym = pos["alpaca_symbol"]
+        entry = pos["entry"]
+        qty = pos["qty"]
         pnl_pct = (price - entry) / entry
         pnl_usd = (price - entry) * qty
+        hold_hours = 0
+        if symbol in self._state:
+            hold_hours = (datetime.now() - self._state[symbol]["first_seen"]).total_seconds() / 3600
 
-        try:
-            opened = datetime.fromisoformat(pos["opened_at"])
-        except (ValueError, TypeError):
-            opened = datetime.now()
-        hold_hours = (datetime.now() - opened).total_seconds() / 3600
+        logger.info(f"Monitor EXIT: {symbol} reason={reason} P&L={pnl_pct:+.2%} (${pnl_usd:+,.2f}) hold={hold_hours:.0f}h")
 
-        logger.info(f"Monitor EXIT: {symbol} reason={reason} P&L={pnl_pct:+.2%} (${pnl_usd:+,.2f}) hold={hold_hours:.1f}h")
+        # Close on Alpaca
+        headers = {"APCA-API-KEY-ID": self.alpaca_key, "APCA-API-SECRET-KEY": self.alpaca_secret}
+        async with httpx.AsyncClient(timeout=10) as client:
+            try:
+                await client.delete(f"{self.alpaca_base}/v2/positions/{alpaca_sym}", headers=headers)
+            except Exception as e:
+                logger.error(f"Close failed {symbol}: {e}")
 
-        # Close on Alpaca — use raw symbol (BTCUSD) or slash format (BTC/USD)
-        alpaca_symbol = pos.get("alpaca_symbol") or symbol.replace("-", "/")
-        await self._close_alpaca_position(alpaca_symbol)
+        # Clean up state
+        self._state.pop(symbol, None)
 
-        # Update DB
-        self.repo.delete_position(symbol)
-
-        # Emit TradeClosedEvent
+        # Emit event
         event = TradeClosedEvent(
             timestamp=datetime.now(),
-            order_id=pos.get("order_id", symbol),
+            order_id=symbol,
             close_price=price,
             close_reason=reason,
             pnl_usd=pnl_usd,
             pnl_pct=pnl_pct,
             hold_time_hours=hold_hours,
-            max_favorable_excursion=((pos.get("hwm", entry) or entry) - entry) / entry if entry else 0,
         )
         await self.bus.publish(event)
 
-        self.repo.log_event("monitor_agent", "trade_closed", symbol, {
-            "reason": reason, "pnl_usd": pnl_usd, "pnl_pct": pnl_pct, "hold_hours": hold_hours,
-        })
-
-    async def _partial_close(self, pos: dict, pct: float, price: float, reason: str):
-        symbol = pos["symbol"]
-        qty = pos["quantity"] * pct
-        alpaca_symbol = symbol.replace("-", "/")
-
+    async def _partial_close(self, pos: dict, qty: float, reason: str):
+        alpaca_sym = pos["alpaca_symbol"]
         headers = {
             "APCA-API-KEY-ID": self.alpaca_key,
             "APCA-API-SECRET-KEY": self.alpaca_secret,
@@ -287,28 +208,34 @@ class MonitorAgent:
                 await client.post(
                     f"{self.alpaca_base}/v2/orders",
                     headers=headers,
-                    json={"symbol": alpaca_symbol, "qty": str(round(qty, 6)),
-                          "side": "sell", "type": "market", "time_in_force": "gtc"},
+                    json={"symbol": alpaca_sym, "qty": str(qty), "side": "sell",
+                          "type": "market", "time_in_force": "gtc"},
                 )
+                logger.info(f"Monitor partial close: {pos['symbol']} sell {qty:.6f} ({reason})")
             except Exception as e:
-                logger.error(f"Partial close failed {symbol}: {e}")
+                logger.error(f"Partial close failed {pos['symbol']}: {e}")
 
-    async def _close_alpaca_position(self, symbol: str):
-        headers = {
-            "APCA-API-KEY-ID": self.alpaca_key,
-            "APCA-API-SECRET-KEY": self.alpaca_secret,
-        }
+    async def _fetch_alpaca_positions(self) -> list[dict]:
+        headers = {"APCA-API-KEY-ID": self.alpaca_key, "APCA-API-SECRET-KEY": self.alpaca_secret}
         async with httpx.AsyncClient(timeout=10) as client:
             try:
-                await client.delete(
-                    f"{self.alpaca_base}/v2/positions/{symbol}",
-                    headers=headers,
-                )
+                r = await client.get(f"{self.alpaca_base}/v2/positions", headers=headers)
+                if r.status_code == 200:
+                    result = []
+                    for p in r.json():
+                        raw = p.get("symbol", "")
+                        # Normalize: BTCUSD → BTC-USD
+                        norm = raw[:-3] + "-USD" if raw.endswith("USD") and "-" not in raw else raw
+                        result.append({
+                            "symbol": norm,
+                            "alpaca_symbol": raw,
+                            "entry": float(p.get("avg_entry_price", 0)),
+                            "current": float(p.get("current_price", 0)),
+                            "qty": float(p.get("qty", 0)),
+                            "market_value": float(p.get("market_value", 0)),
+                            "unrealized_pl": float(p.get("unrealized_pl", 0)),
+                        })
+                    return result
             except Exception as e:
-                logger.error(f"Close position failed {symbol}: {e}")
-
-    async def _get_current_price(self, symbol: str) -> float:
-        coinbase_sym = symbol.replace("/", "-")
-        if "-USD" not in coinbase_sym:
-            coinbase_sym = f"{coinbase_sym}-USD"
-        return await coinbase_client.get_price(coinbase_sym)
+                logger.error(f"Monitor: Alpaca fetch failed: {e}")
+        return []

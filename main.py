@@ -179,22 +179,13 @@ class SignalForgeOrchestrator:
             )),
         ]
 
-        # Start dashboard
-        dashboard_task = asyncio.create_task(
-            uvicorn.Server(
-                uvicorn.Config(
-                    dashboard_app,
-                    host="0.0.0.0",
-                    port=settings.dashboard_port,
-                    log_level="warning",
-                )
-            ).serve()
-        )
+        # Dashboard runs separately on port 8888 (dashboard_server.py)
+        # Don't start another one here — avoids port conflicts
 
-        logger.info(f"Signal Forge v2 running — {len(agent_tasks)} agent loops + dashboard + event bus")
+        logger.info(f"Signal Forge v2 running — {len(agent_tasks)} agent loops + event bus")
 
         try:
-            await asyncio.gather(bus_task, dashboard_task, *agent_tasks)
+            await asyncio.gather(bus_task, *agent_tasks)
         except asyncio.CancelledError:
             logger.info("Signal Forge v2 shutting down...")
             self.bus.stop()
