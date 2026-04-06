@@ -96,11 +96,11 @@ class AIAnalystAgent:
             stop_distance=stop_distance,
         )
 
-        # Use Llama 3.2 for fast initial scoring, DeepSeek R1 for high-conviction review
-        response = await self._call_ollama(self.fast_model, prompt, timeout=45)
-        if response is None:
-            logger.warning(f"Llama timeout for {symbol}, trying DeepSeek R1")
-            response = await self._call_ollama(self.primary_model, prompt, timeout=120)
+        # Use Qwen3 14B as primary (Alpha Arena winner), Llama 3.2 as fast fallback
+        response = await self._call_ollama(self.primary_model, prompt, timeout=60)
+        if not response or len(response.strip()) < 10:
+            logger.warning(f"Qwen3 empty/short for {symbol}, falling back to {self.fast_model}")
+            response = await self._call_ollama(self.fast_model, prompt, timeout=30)
 
         if response is None:
             logger.error(f"AI Analyst: both models failed for {symbol}")
@@ -165,19 +165,23 @@ class AIAnalystAgent:
         await self.bus.publish(proposal)
 
     async def _call_ollama(self, model: str, prompt: str, timeout: int = 90) -> str | None:
+        """Call Ollama using chat endpoint (works better with Qwen3)."""
         async with httpx.AsyncClient(timeout=timeout) as client:
             try:
                 r = await client.post(
-                    f"{self.ollama_host}/api/generate",
+                    f"{self.ollama_host}/api/chat",
                     json={
                         "model": model,
-                        "prompt": prompt,
+                        "messages": [
+                            {"role": "system", "content": "You are a JSON-only crypto trading analyst. Always respond with valid JSON. No thinking tags, no markdown, no explanation — just the JSON object."},
+                            {"role": "user", "content": prompt},
+                        ],
                         "stream": False,
                         "options": {"temperature": 0.1, "num_predict": 600},
                     },
                 )
                 if r.status_code == 200:
-                    return r.json().get("response", "")
+                    return r.json().get("message", {}).get("content", "")
             except httpx.TimeoutException:
                 logger.warning(f"Ollama timeout ({model}, {timeout}s)")
             except Exception as e:

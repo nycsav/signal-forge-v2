@@ -21,10 +21,10 @@ class Settings(BaseSettings):
     # altFINS
     altfins_api_key: str = ""
 
-    # Ollama
+    # Ollama — Qwen3 14B primary (Alpha Arena 2025 winner), Llama 3.2 fast fallback
     ollama_host: str = "http://localhost:11434"
-    deepseek_model: str = "deepseek-r1:14b"
-    fast_model: str = "llama3.2:3b"
+    deepseek_model: str = "qwen3:14b"  # Primary analyst (Alpha Arena winner architecture)
+    fast_model: str = "llama3.2:3b"    # Fast fallback (reliable JSON output)
 
     # Optional
     perplexity_api_key: str = ""

@@ -39,8 +39,8 @@ for grp, syms in CORRELATED_GROUPS.items():
 
 class RiskAgent:
     # Risk parameters (from spec Section 4)
-    MAX_POSITION_PCT = 0.02          # 2% per trade (hard cap)
-    HIGH_CONVICTION_PCT = 0.025      # 2.5% for score >= 85
+    MAX_POSITION_PCT = 0.01          # 1% per trade — Quarter-Kelly (research: crypto needs lower sizing)
+    HIGH_CONVICTION_PCT = 0.015      # 1.5% for score >= 85 (Quarter-Kelly high conviction)
     MAX_OPEN_POSITIONS = 5
     DAILY_LOSS_LIMIT = 0.05          # 5%
     WEEKLY_LOSS_LIMIT = 0.10         # 10%
