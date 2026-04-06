@@ -14,16 +14,19 @@ from agents.event_bus import EventBus
 from agents.events import TradeProposal, RiskAssessmentEvent, RiskDecision, Direction
 from db.repository import Repository
 
-# Correlation groups
+# Correlation groups — top 50 coins by sector
 CORRELATED_GROUPS = {
-    "blue_chip": ["BTC", "ETH"],
-    "layer1": ["SOL", "AVAX", "NEAR", "APT", "SUI", "ADA", "DOT", "ATOM"],
-    "layer2": ["ARB", "OP"],
-    "defi": ["UNI", "LINK"],
-    "meme": ["DOGE"],
+    "blue_chip": ["BTC", "ETH", "BNB"],
+    "layer1": ["SOL", "AVAX", "NEAR", "APT", "SUI", "ADA", "DOT", "ATOM", "SEI", "FTM", "ICP", "EOS", "ALGO"],
+    "layer2": ["ARB", "OP", "MATIC", "IMX", "STX"],
+    "defi": ["UNI", "LINK", "AAVE", "CRV", "MKR", "COMP", "SNX", "RUNE"],
+    "meme": ["DOGE", "SHIB", "PEPE", "WIF", "BONK", "FLOKI"],
+    "ai_depin": ["RENDER", "FET", "INJ", "GRT"],
     "storage": ["FIL"],
-    "legacy": ["LTC", "XRP"],
-    "ai_oracle": ["INJ"],
+    "legacy": ["LTC", "XRP", "XLM", "TRX", "HBAR", "VET"],
+    "metaverse": ["SAND", "MANA"],
+    "modular": ["TIA"],
+    "rwa": ["ONDO"],
 }
 
 SYMBOL_GROUP = {}

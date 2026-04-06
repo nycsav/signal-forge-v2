@@ -44,12 +44,18 @@ class Settings(BaseSettings):
     monitor_interval_seconds: int = 300
     max_open_positions: int = 5
 
-    # Watchlist
+    # Watchlist — Top 50 by market cap
     watchlist: list[str] = [
-        "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "ADA-USD",
-        "AVAX-USD", "DOGE-USD", "DOT-USD", "LINK-USD", "UNI-USD",
-        "ATOM-USD", "LTC-USD", "NEAR-USD", "APT-USD", "ARB-USD",
-        "OP-USD", "FIL-USD", "INJ-USD", "SUI-USD",
+        "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "BNB-USD",
+        "ADA-USD", "AVAX-USD", "DOGE-USD", "DOT-USD", "LINK-USD",
+        "UNI-USD", "ATOM-USD", "LTC-USD", "NEAR-USD", "APT-USD",
+        "ARB-USD", "OP-USD", "FIL-USD", "INJ-USD", "SUI-USD",
+        "MATIC-USD", "AAVE-USD", "RENDER-USD", "FET-USD", "TIA-USD",
+        "SEI-USD", "STX-USD", "IMX-USD", "PEPE-USD", "WIF-USD",
+        "BONK-USD", "FLOKI-USD", "SHIB-USD", "TRX-USD", "XLM-USD",
+        "HBAR-USD", "VET-USD", "ALGO-USD", "ICP-USD", "FTM-USD",
+        "EOS-USD", "SAND-USD", "MANA-USD", "GRT-USD", "CRV-USD",
+        "MKR-USD", "COMP-USD", "SNX-USD", "RUNE-USD", "ONDO-USD",
     ]
 
     model_config = {"env_file": ".env", "extra": "ignore"}

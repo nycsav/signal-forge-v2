@@ -15,12 +15,22 @@ from talipp.indicators import EMA, SMA, RSI, BB, MACD, ATR
 
 COINGECKO_IDS = {
     "BTC-USD": "bitcoin", "ETH-USD": "ethereum", "SOL-USD": "solana",
-    "XRP-USD": "ripple", "ADA-USD": "cardano", "AVAX-USD": "avalanche-2",
-    "DOGE-USD": "dogecoin", "DOT-USD": "polkadot", "LINK-USD": "chainlink",
-    "UNI-USD": "uniswap", "ATOM-USD": "cosmos", "LTC-USD": "litecoin",
-    "NEAR-USD": "near", "APT-USD": "aptos", "ARB-USD": "arbitrum",
-    "OP-USD": "optimism", "FIL-USD": "filecoin", "INJ-USD": "injective-protocol",
-    "SUI-USD": "sui",
+    "XRP-USD": "ripple", "BNB-USD": "binancecoin", "ADA-USD": "cardano",
+    "AVAX-USD": "avalanche-2", "DOGE-USD": "dogecoin", "DOT-USD": "polkadot",
+    "LINK-USD": "chainlink", "UNI-USD": "uniswap", "ATOM-USD": "cosmos",
+    "LTC-USD": "litecoin", "NEAR-USD": "near", "APT-USD": "aptos",
+    "ARB-USD": "arbitrum", "OP-USD": "optimism", "FIL-USD": "filecoin",
+    "INJ-USD": "injective-protocol", "SUI-USD": "sui", "MATIC-USD": "matic-network",
+    "AAVE-USD": "aave", "RENDER-USD": "render-token", "FET-USD": "fetch-ai",
+    "TIA-USD": "celestia", "SEI-USD": "sei-network", "STX-USD": "blockstack",
+    "IMX-USD": "immutable-x", "PEPE-USD": "pepe", "WIF-USD": "dogwifcoin",
+    "BONK-USD": "bonk", "FLOKI-USD": "floki", "SHIB-USD": "shiba-inu",
+    "TRX-USD": "tron", "XLM-USD": "stellar", "HBAR-USD": "hedera-hashgraph",
+    "VET-USD": "vechain", "ALGO-USD": "algorand", "ICP-USD": "internet-computer",
+    "FTM-USD": "fantom", "EOS-USD": "eos", "SAND-USD": "the-sandbox",
+    "MANA-USD": "decentraland", "GRT-USD": "the-graph", "CRV-USD": "curve-dao-token",
+    "MKR-USD": "maker", "COMP-USD": "compound-governance-token", "SNX-USD": "havven",
+    "RUNE-USD": "thorchain", "ONDO-USD": "ondo-finance",
 }
 
 
