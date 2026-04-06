@@ -9,10 +9,12 @@ Emits RiskAssessmentEvent.
 import math
 from datetime import datetime, timedelta
 from loguru import logger
+import httpx
 
 from agents.event_bus import EventBus
 from agents.events import TradeProposal, RiskAssessmentEvent, RiskDecision, Direction
 from db.repository import Repository
+from config.settings import settings
 
 # Correlation groups — top 50 coins by sector
 CORRELATED_GROUPS = {
@@ -51,6 +53,12 @@ class RiskAgent:
         self.bus = event_bus
         self.repo = Repository(db_path)
         self.portfolio_value = portfolio_value
+        self._alpaca_key = settings.alpaca_api_key
+        self._alpaca_secret = settings.alpaca_secret_key or settings.alpaca_api_secret
+        self._alpaca_base = settings.alpaca_base_url
+        self._cached_position_count: int = 0
+        self._cached_positions: list = []
+        self._cache_time: float = 0
         self.bus.subscribe(TradeProposal, self._on_proposal)
 
     async def _on_proposal(self, proposal: TradeProposal):
@@ -84,7 +92,7 @@ class RiskAgent:
             kelly_fraction=size_pct,
             risk_score=self._compute_risk_score(proposal),
             correlation_warning=False,
-            open_positions_count=len(self.repo.get_open_trades()),
+            open_positions_count=self._cached_position_count,
         )
 
         logger.info(
@@ -107,7 +115,7 @@ class RiskAgent:
             decision=RiskDecision.VETOED,
             veto_reason=reason,
             risk_score=1.0,
-            open_positions_count=len(self.repo.get_open_trades()),
+            open_positions_count=self._cached_position_count,
         )
         logger.warning(f"Risk VETOED: {proposal.symbol} — {reason}")
         await self.bus.publish(event)
@@ -131,10 +139,31 @@ class RiskAgent:
         return True, ""
 
     def _check_position_count(self) -> tuple[bool, str]:
-        open_trades = self.repo.get_open_trades()
-        if len(open_trades) >= self.MAX_OPEN_POSITIONS:
-            return False, f"Max positions reached ({len(open_trades)}/{self.MAX_OPEN_POSITIONS})"
+        count = self._get_alpaca_position_count()
+        if count >= self.MAX_OPEN_POSITIONS:
+            return False, f"Max positions reached ({count}/{self.MAX_OPEN_POSITIONS})"
         return True, ""
+
+    def _get_alpaca_position_count(self) -> int:
+        """Get live position count from Alpaca (cached 30s)."""
+        import time
+        now = time.time()
+        if now - self._cache_time < 30:
+            return self._cached_position_count
+        try:
+            r = httpx.get(
+                f"{self._alpaca_base}/v2/positions",
+                headers={"APCA-API-KEY-ID": self._alpaca_key, "APCA-API-SECRET-KEY": self._alpaca_secret},
+                timeout=10,
+            )
+            if r.status_code == 200:
+                positions = r.json()
+                self._cached_position_count = len(positions)
+                self._cached_positions = [{"symbol": p.get("symbol", "")} for p in positions]
+                self._cache_time = now
+        except Exception as e:
+            logger.error(f"Risk: Alpaca position fetch failed: {e}")
+        return self._cached_position_count
 
     def _check_daily_loss(self) -> tuple[bool, str]:
         since = (datetime.now() - timedelta(days=1)).isoformat()
@@ -158,9 +187,10 @@ class RiskAgent:
         base = p.symbol.replace("-USD", "").replace("/USD", "").upper()
         new_group = SYMBOL_GROUP.get(base, "unknown")
 
-        open_trades = self.repo.get_open_trades()
+        # Use cached Alpaca positions (refreshed by _get_alpaca_position_count)
+        self._get_alpaca_position_count()
         same_group = 0
-        for t in open_trades:
+        for t in self._cached_positions:
             t_base = t["symbol"].replace("-USD", "").replace("/USD", "").replace("USD", "").upper()
             if SYMBOL_GROUP.get(t_base, "?") == new_group:
                 same_group += 1

@@ -60,6 +60,9 @@ class MonitorAgent:
         if not positions:
             return
 
+        # Fetch actual fill times from Alpaca orders (once per cycle)
+        fill_times = await self._fetch_fill_times()
+
         actions_taken = 0
         for pos in positions:
             symbol = pos["symbol"]
@@ -70,14 +73,22 @@ class MonitorAgent:
             if entry <= 0 or current <= 0:
                 continue
 
-            # Get or create state
+            # Get or create state — use actual fill time if available
             if symbol not in self._state:
+                alpaca_sym = pos["alpaca_symbol"]
+                fill_time = fill_times.get(alpaca_sym) or fill_times.get(alpaca_sym.replace("USD", "/USD"))
+                first_seen = datetime.now()
+                if fill_time:
+                    try:
+                        first_seen = datetime.fromisoformat(fill_time.replace("Z", "+00:00")).replace(tzinfo=None)
+                    except Exception:
+                        pass
                 self._state[symbol] = {
                     "hwm": current,
                     "trailing_active": False,
                     "tp1_hit": False,
                     "tp2_hit": False,
-                    "first_seen": datetime.now(),
+                    "first_seen": first_seen,
                 }
 
             state = self._state[symbol]
@@ -214,6 +225,29 @@ class MonitorAgent:
                 logger.info(f"Monitor partial close: {pos['symbol']} sell {qty:.6f} ({reason})")
             except Exception as e:
                 logger.error(f"Partial close failed {pos['symbol']}: {e}")
+
+    async def _fetch_fill_times(self) -> dict[str, str]:
+        """Get the earliest fill timestamp per symbol from Alpaca orders."""
+        headers = {"APCA-API-KEY-ID": self.alpaca_key, "APCA-API-SECRET-KEY": self.alpaca_secret}
+        fill_times: dict[str, str] = {}
+        async with httpx.AsyncClient(timeout=10) as client:
+            try:
+                r = await client.get(
+                    f"{self.alpaca_base}/v2/orders",
+                    headers=headers,
+                    params={"status": "filled", "limit": 100, "direction": "asc"},
+                )
+                if r.status_code == 200:
+                    for o in r.json():
+                        sym = o.get("symbol", "")
+                        filled_at = o.get("filled_at", "")
+                        if sym and filled_at and o.get("side") == "buy":
+                            # Keep the earliest buy fill time per symbol
+                            if sym not in fill_times:
+                                fill_times[sym] = filled_at
+            except Exception as e:
+                logger.error(f"Monitor: fill times fetch failed: {e}")
+        return fill_times
 
     async def _fetch_alpaca_positions(self) -> list[dict]:
         headers = {"APCA-API-KEY-ID": self.alpaca_key, "APCA-API-SECRET-KEY": self.alpaca_secret}
