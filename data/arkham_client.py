@@ -94,12 +94,13 @@ class ArkhamClient:
             {
                 "from": t.get("fromAddress", {}).get("arkhamEntity", {}).get("id", t.get("fromAddress", {}).get("address", "")[:10]),
                 "to": t.get("toAddress", {}).get("arkhamEntity", {}).get("id", t.get("toAddress", {}).get("address", "")[:10]),
-                "token": t.get("tokenSymbol", ""),
-                "usd_value": t.get("usdValue", 0),
-                "chain": t.get("chain", ""),
-                "timestamp": t.get("timestamp", ""),
+                "token": t.get("tokenName", "") or t.get("tokenSymbol", ""),
+                "usd_value": t.get("unitValue", 0) or t.get("usdValue", 0) or t.get("historicalUSD", 0),
+                "chain": t.get("fromAddress", {}).get("chain", "") or t.get("chain", ""),
+                "timestamp": t.get("blockTimestamp", ""),
                 "from_label": t.get("fromAddress", {}).get("arkhamEntity", {}).get("name", "Unknown"),
                 "to_label": t.get("toAddress", {}).get("arkhamEntity", {}).get("name", "Unknown"),
+                "tx_hash": t.get("transactionHash", "")[:16],
             }
             for t in transfers[:limit]
         ]
