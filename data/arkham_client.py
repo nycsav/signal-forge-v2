@@ -89,6 +89,8 @@ class ArkhamClient:
 
         data = await self._get("/transfers", params)
         transfers = data.get("transfers", []) if isinstance(data, dict) else []
+        if not transfers:
+            return []
 
         return [
             {
