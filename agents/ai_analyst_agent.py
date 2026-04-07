@@ -58,11 +58,31 @@ class AIAnalystAgent:
             pre_score=pre_score,
         )
 
-        # Use Qwen3 14B as primary (Alpha Arena winner), Llama 3.2 as fast fallback
-        response = await self._call_ollama(self.primary_model, prompt, timeout=60)
+        # Dual-model consensus: Qwen3 14B + DeepSeek R1 14B
+        # If both agree on direction → high confidence. If they disagree → lower size.
+        response_primary = await self._call_ollama(self.primary_model, prompt, timeout=90)
+        response_secondary = await self._call_ollama("deepseek-r1:14b", prompt, timeout=90)
+
+        # Use primary (Qwen3) as the main response
+        response = response_primary
         if not response or len(response.strip()) < 10:
-            logger.warning(f"Qwen3 empty/short for {symbol}, falling back to {self.fast_model}")
-            response = await self._call_ollama(self.fast_model, prompt, timeout=30)
+            response = response_secondary
+            if not response or len(response.strip()) < 10:
+                # Final fallback to Llama 3.2 (always works)
+                response = await self._call_ollama(self.fast_model, prompt, timeout=30)
+
+        # Check if both models agree (consensus boost)
+        consensus = False
+        if response_primary and response_secondary:
+            try:
+                import re as _re
+                p1 = _re.search(r'"direction"\s*:\s*"(\w+)"', response_primary)
+                p2 = _re.search(r'"direction"\s*:\s*"(\w+)"', response_secondary)
+                if p1 and p2 and p1.group(1) == p2.group(1) and p1.group(1) != "flat":
+                    consensus = True
+                    logger.info(f"AI Analyst: {symbol} CONSENSUS — both models agree: {p1.group(1)}")
+            except Exception:
+                pass
 
         if response is None:
             logger.error(f"AI Analyst: both models failed for {symbol}")
@@ -103,13 +123,18 @@ class AIAnalystAgent:
         forced_tp2 = entry + risk * 3.0   # +3R
         forced_tp3 = entry + risk * 5.0   # +5R
 
+        # Consensus boost: +10% confidence when both models agree
+        ai_conf = parsed.get("ai_confidence", 0.5)
+        if consensus:
+            ai_conf = min(1.0, ai_conf + 0.1)
+
         proposal = TradeProposal(
             timestamp=datetime.now(),
             proposal_id=str(uuid.uuid4()),
             symbol=symbol,
             direction=direction,
             raw_score=final_score,
-            ai_confidence=parsed.get("ai_confidence", 0.5),
+            ai_confidence=ai_conf,
             ai_rationale=parsed.get("rationale", "")[:500],
             suggested_entry=entry,
             suggested_stop=forced_stop,
