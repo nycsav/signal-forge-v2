@@ -144,11 +144,31 @@ class AIAnalystAgent:
             score_breakdown=final_breakdown,
         )
 
+        consensus_tag = " [CONSENSUS]" if consensus else ""
         logger.info(
             f"AI Analyst PROPOSAL: {symbol} {direction.value} "
-            f"score={final_score:.0f} conf={proposal.ai_confidence:.0%} "
+            f"score={final_score:.0f} conf={proposal.ai_confidence:.0%}{consensus_tag} "
             f"— {proposal.ai_rationale[:80]}"
         )
+
+        # Log to DB for dashboard tracking
+        self.scorer.repo = getattr(self.scorer, 'repo', None)
+        try:
+            from db.repository import Repository
+            from config.settings import settings
+            repo = Repository(settings.database_path)
+            repo.log_event("ai_analyst", "proposal", symbol, {
+                "direction": direction.value,
+                "score": round(final_score, 1),
+                "ai_confidence": round(ai_conf, 2),
+                "consensus": consensus,
+                "qwen3_response": (response_primary or "")[:100] if response_primary else None,
+                "deepseek_response": (response_secondary or "")[:100] if response_secondary else None,
+                "rationale": proposal.ai_rationale[:200],
+            })
+        except Exception:
+            pass
+
         await self.bus.publish(proposal)
 
     async def _call_ollama(self, model: str, prompt: str, timeout: int = 90) -> str | None:
