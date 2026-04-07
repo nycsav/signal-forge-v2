@@ -122,9 +122,13 @@ class LiveEngine:
             if ind.get("count", 0) < 30:
                 continue
 
-            # Score
+            # Score — in extreme fear, lower the bar further
             tech_score = self._quick_tech_score(ind, price)
-            if tech_score < rules.MIN_SIGNAL_SCORE:
+            effective_threshold = rules.MIN_SIGNAL_SCORE
+            if fg_val < rules.FEAR_AGGRESSIVE_THRESHOLD:
+                effective_threshold = 50  # More aggressive in extreme fear
+            logger.info(f"Live SCAN {symbol}: tech_score={tech_score:.0f} threshold={effective_threshold}")
+            if tech_score < effective_threshold:
                 continue
 
             # AI analysis (both models)
@@ -277,15 +281,21 @@ class LiveEngine:
         """Get dual-model AI consensus."""
         prompt = f"{symbol} ${price:,.0f} RSI=? F&G={fear_greed} Score={score:.0f}/100\n\nJSON only: {{\"direction\":\"long/short/flat\",\"score\":0-100,\"ai_confidence\":0.0-1.0,\"rationale\":\"one sentence\"}}"
 
+        # Use Llama 3.2 3B for speed (3s, reliable JSON), then Qwen3 as second opinion
+        models = ["llama3.2:3b", "qwen3:14b"]
         results = []
-        for model in ["qwen3:14b", "deepseek-r1:14b"]:
+        for model in models:
+            timeout_s = 15 if "llama" in model else 60
             try:
-                async with httpx.AsyncClient(timeout=90) as client:
+                async with httpx.AsyncClient(timeout=timeout_s) as client:
                     r = await client.post(f"{settings.ollama_host}/api/generate",
                         json={"model": model, "prompt": prompt, "stream": False,
-                              "options": {"temperature": 0.1, "num_predict": 2000}})
+                              "options": {"temperature": 0.1, "num_predict": 2000 if "qwen" in model else 300}})
                     if r.status_code == 200:
                         resp = r.json().get("response", "")
+                        if not resp or len(resp.strip()) < 5:
+                            logger.debug(f"Live AI: {model} returned empty")
+                            continue
                         import re, json as _json
                         matches = re.findall(r'\{[^{}]*\}', resp)
                         for m in matches:
@@ -293,11 +303,12 @@ class LiveEngine:
                                 parsed = _json.loads(m)
                                 if "direction" in parsed:
                                     results.append(parsed)
+                                    logger.info(f"Live AI [{model}]: {parsed.get('direction')} conf={parsed.get('ai_confidence')} — {parsed.get('rationale','')[:60]}")
                                     break
                             except Exception:
                                 pass
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Live AI {model} failed: {e}")
 
         if not results:
             return None
