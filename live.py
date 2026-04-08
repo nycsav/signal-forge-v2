@@ -54,8 +54,13 @@ class LiveEngine:
         logger.info(f"Stop: {rules.STOP_LOSS_PCT*100}% | TP1: +{rules.TP1_PCT*100}% | TP2: +{rules.TP2_PCT*100}%")
 
     async def run(self):
-        logger.info("Live Engine starting scan loop (5 min interval)...")
+        logger.info("Live Engine starting scan loop (5 min interval + 60s whale trigger)...")
         self.repo.log("engine", "Live engine started" + (" (DRY RUN)" if self.dry_run else ""))
+
+        # Start whale trigger in background
+        from agents.whale_trigger import WhaleTrigger
+        self._whale = WhaleTrigger(on_signal=self._on_whale_signal)
+        asyncio.create_task(self._whale.run_forever())
 
         # Warm up technical indicators
         await self.technical.warmup(rules.WATCHLIST)
@@ -170,11 +175,17 @@ class LiveEngine:
             tp1 = price * (1 + rules.TP1_PCT)
             tp2 = price * (1 + rules.TP2_PCT)
 
-            logger.info(
-                f"LIVE {'(DRY RUN) ' if self.dry_run else ''}SIGNAL: {symbol} {direction} "
-                f"score={tech_score:.0f} conf={confidence:.0%} consensus={consensus} "
-                f"size=${size_usd:.2f} stop=${stop:.2f} tp1=${tp1:.2f}"
+            # Build trade rationale for logging
+            trade_rationale = (
+                f"{direction.upper()} {symbol} @ ${price:,.2f} | "
+                f"Score={tech_score:.0f} Conf={confidence:.0%} {'CONSENSUS' if consensus else 'single'} | "
+                f"F&G={fg_val} Regime=accumulate | "
+                f"Stop=${stop:.2f} ({rules.STOP_LOSS_PCT*100}%) TP1=${tp1:.2f} (+{rules.TP1_PCT*100}%) TP2=${tp2:.2f} (+{rules.TP2_PCT*100}%) | "
+                f"Size=${size_usd:.2f} ({rules.MAX_POSITION_PCT*100}%) | "
+                f"Reason: {rationale[:80]}"
             )
+
+            logger.info(f"LIVE {'(DRY RUN) ' if self.dry_run else ''}TRADE: {trade_rationale}")
 
             # Execute
             if not self.dry_run:
@@ -343,6 +354,12 @@ class LiveEngine:
             except Exception as e:
                 logger.error(f"Live order error: {e}")
         return None
+
+    async def _on_whale_signal(self, signal: dict):
+        """Whale activity detected — run immediate scan."""
+        logger.warning(f"LIVE WHALE TRIGGER: {signal.get('direction','?').upper()} — {signal.get('reason','')}")
+        self.repo.log("whale_trigger", signal.get("reason", ""), data=signal)
+        await self._scan_cycle()
 
     async def _close_position(self, symbol: str):
         alpaca_sym = symbol.replace("-USD", "").replace("-", "") + "USD"
