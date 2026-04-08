@@ -97,8 +97,21 @@ class MonitorAgent:
             if current > state["hwm"]:
                 state["hwm"] = current
 
-            # Calculate levels
-            atr = entry * 0.03  # ATR estimate: 3% of entry
+            # Calculate REAL ATR from recent price history (not hardcoded)
+            closes = state.get("closes", [])
+            closes.append(current)
+            if len(closes) > 100:
+                closes = closes[-100:]
+            state["closes"] = closes
+
+            if len(closes) >= 15:
+                # True ATR(14): average of absolute price changes over 14 periods
+                true_ranges = [abs(closes[i] - closes[i-1]) for i in range(-14, 0)]
+                atr = sum(true_ranges) / len(true_ranges)
+            else:
+                # Fallback: 1.2% of entry (realistic for current low-vol market)
+                atr = entry * 0.012
+
             risk = atr * self.ATR_STOP_MULT
             stop = entry - risk
             activation = entry + atr * self.ATR_ACTIVATION_MULT

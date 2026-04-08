@@ -44,8 +44,8 @@ class RiskAgent:
     MAX_OPEN_POSITIONS = 5
     DAILY_LOSS_LIMIT = 0.05          # 5%
     WEEKLY_LOSS_LIMIT = 0.10         # 10%
-    MIN_SIGNAL_SCORE = 55
-    MIN_AI_CONFIDENCE = 0.45
+    MIN_SIGNAL_SCORE = 62
+    MIN_AI_CONFIDENCE = 0.62
     MAX_SAME_GROUP = 3               # Max per sector (spec: 3)
     MIN_RISK_REWARD = 2.0
 
