@@ -31,7 +31,8 @@ class Settings(BaseSettings):
     whale_alert_api_key: str = ""
     cryptoquant_api_key: str = ""
     nansen_api_key: str = ""
-    arkham_api_key: str = ""  # Free — apply at intel.arkm.com/api
+    arkham_api_key: str = ""
+    cmc_api_key: str = ""  # Free — apply at intel.arkm.com/api
 
     # Infrastructure
     redis_url: str = "redis://localhost:6379"
