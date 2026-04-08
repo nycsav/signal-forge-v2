@@ -94,6 +94,11 @@ class SignalBundle(BaseModel):
     sentiment: Optional[SentimentEvent] = None
     on_chain: Optional[OnChainEvent] = None
     technical: TechnicalEvent
+    sentiment_stale: bool = False
+    onchain_stale: bool = False
+    sentiment_age_mins: float = 0.0
+    onchain_age_hrs: float = 0.0
+    max_allowed_confidence: float = 1.0  # RiskAgent reads this
 
 
 # ── AI ANALYST → RISK AGENT ───────────────────────────────────

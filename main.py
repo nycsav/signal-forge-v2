@@ -7,6 +7,7 @@ Architecture: 3-tier hierarchy (Strategic → Tactical → Execution).
 
 import asyncio
 import signal as sig
+from datetime import datetime
 from loguru import logger
 import uvicorn
 
@@ -68,6 +69,8 @@ class SignalForgeOrchestrator:
         self._technical_states: dict = {}
         self._latest_sentiment: dict = {}
         self._latest_onchain: dict = {}
+        self._last_sentiment_ts: datetime = datetime.now()
+        self._last_onchain_ts: datetime = datetime.now()
 
         # Subscribe orchestrator to assemble SignalBundles
         self.bus.subscribe(MarketStateEvent, self._on_market_state)
@@ -103,9 +106,11 @@ class SignalForgeOrchestrator:
 
     async def _on_sentiment(self, event: SentimentEvent):
         self._latest_sentiment[event.symbol] = event
+        self._last_sentiment_ts = datetime.now()
 
     async def _on_onchain(self, event: OnChainEvent):
         self._latest_onchain[event.symbol] = event
+        self._last_onchain_ts = datetime.now()
 
     async def _on_whale_signal(self, signal: dict):
         """Whale activity detected → trigger immediate market scan."""
@@ -126,20 +131,42 @@ class SignalForgeOrchestrator:
         self.repo.log_event("whale_trigger", f"whale_{direction}", None, signal)
 
     async def _try_assemble_bundle(self, symbol: str):
+        from datetime import timedelta
+        MAX_SENTIMENT_AGE = timedelta(minutes=30)
+        MAX_ONCHAIN_AGE = timedelta(hours=2)
+
         market = self._market_states.get(symbol)
         technical = self._technical_states.get(symbol)
 
         if not (market and technical):
             return
 
+        now = datetime.now()
+
+        # Staleness checks
+        sentiment_ts = getattr(self, '_last_sentiment_ts', now)
+        onchain_ts = getattr(self, '_last_onchain_ts', now)
+        sentiment_age = now - sentiment_ts
+        onchain_age = now - onchain_ts
+        sentiment_fresh = sentiment_age <= MAX_SENTIMENT_AGE
+        onchain_fresh = onchain_age <= MAX_ONCHAIN_AGE
+
         bundle = SignalBundle(
             timestamp=market.timestamp,
             symbol=symbol,
             market_state=market,
-            sentiment=self._latest_sentiment.get(symbol),
-            on_chain=self._latest_onchain.get(symbol),
+            sentiment=self._latest_sentiment.get(symbol) if sentiment_fresh else None,
+            on_chain=self._latest_onchain.get(symbol) if onchain_fresh else None,
             technical=technical,
+            sentiment_stale=not sentiment_fresh,
+            onchain_stale=not onchain_fresh,
+            sentiment_age_mins=round(sentiment_age.total_seconds() / 60, 1),
+            onchain_age_hrs=round(onchain_age.total_seconds() / 3600, 1),
         )
+
+        # If both context sources are stale, raise the bar
+        if bundle.sentiment_stale and bundle.onchain_stale:
+            bundle.max_allowed_confidence = 0.65
 
         # Log the signal
         tech_score = self.scorer.score_technical(technical)

@@ -23,9 +23,10 @@ from config.settings import settings
 class WhaleTrigger:
     """Polls Arkham every 60s. Fires callback when whale activity detected."""
 
-    # Thresholds
-    POLL_INTERVAL = 60          # Check every 60 seconds
-    MIN_TRANSFER_USD = 500_000  # $500K minimum to care
+    # Thresholds — $2M minimum, filter out bridge/relay noise
+    POLL_INTERVAL = 60
+    MIN_TRANSFER_USD = 2_000_000  # Ignore transfers < $2M
+    BRIDGE_TAGS = {"bridge", "wrapped", "relay", "cross-chain", "wormhole", "layerzero"}
     STABLECOIN_TOKENS = {"usdt", "usdc", "dai", "busd", "tusd", "usd coin", "tether", "paypal usd"}
     EXCHANGE_ENTITIES = {"binance", "coinbase", "kraken", "bybit", "okx", "gate", "kucoin", "bitfinex", "gemini"}
     SMART_MONEY = {"wintermute", "jump-trading", "jump-crypto", "galaxy-digital", "paradigm", "a16z", "three-arrows", "alameda"}
