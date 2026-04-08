@@ -62,31 +62,28 @@ class AIAnalystAgent:
             pre_score=pre_score,
         )
 
-        # Dual-model consensus: Qwen3 14B + DeepSeek R1 14B
-        # If both agree on direction → high confidence. If they disagree → lower size.
-        response_primary = await self._call_ollama(self.primary_model, prompt, timeout=90)
-        response_secondary = await self._call_ollama("deepseek-r1:14b", prompt, timeout=90)
+        # SPEED-FIRST: Llama 3.2 3B primary (15s, reliable JSON)
+        # Then Qwen3 14B as second opinion ONLY if score > 60 (worth the wait)
+        response = await self._call_ollama(self.fast_model, prompt, timeout=20)
 
-        # Use primary (Qwen3) as the main response
-        response = response_primary
-        if not response or len(response.strip()) < 10:
-            response = response_secondary
-            if not response or len(response.strip()) < 10:
-                # Final fallback to Llama 3.2 (always works)
-                response = await self._call_ollama(self.fast_model, prompt, timeout=30)
-
-        # Check if both models agree (consensus boost)
         consensus = False
-        if response_primary and response_secondary:
-            try:
-                import re as _re
-                p1 = _re.search(r'"direction"\s*:\s*"(\w+)"', response_primary)
-                p2 = _re.search(r'"direction"\s*:\s*"(\w+)"', response_secondary)
-                if p1 and p2 and p1.group(1) == p2.group(1) and p1.group(1) != "flat":
-                    consensus = True
-                    logger.info(f"AI Analyst: {symbol} CONSENSUS — both models agree: {p1.group(1)}")
-            except Exception:
-                pass
+        if response and len(response.strip()) > 10:
+            # Parse Llama result first
+            import re as _re
+            p1 = _re.search(r'"direction"\s*:\s*"(\w+)"', response)
+            llama_direction = p1.group(1) if p1 else "flat"
+
+            # Only call Qwen3 for confirmation if Llama says trade (not flat) and score is decent
+            if llama_direction != "flat" and pre_score >= 55:
+                response_qwen = await self._call_ollama(self.primary_model, prompt, timeout=90)
+                if response_qwen and len(response_qwen.strip()) > 10:
+                    p2 = _re.search(r'"direction"\s*:\s*"(\w+)"', response_qwen)
+                    if p2 and p2.group(1) == llama_direction:
+                        consensus = True
+                        logger.info(f"AI Analyst: {symbol} CONSENSUS — Llama + Qwen3 agree: {llama_direction}")
+        else:
+            # Llama failed — try Qwen3 directly
+            response = await self._call_ollama(self.primary_model, prompt, timeout=90)
 
         if response is None:
             logger.error(f"AI Analyst: both models failed for {symbol}")

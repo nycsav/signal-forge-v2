@@ -196,6 +196,19 @@ class MonitorAgent:
 
         logger.info(f"Monitor EXIT: {symbol} reason={reason} P&L={pnl_pct:+.2%} (${pnl_usd:+,.2f}) hold={hold_hours:.0f}h")
 
+        # Log trade outcome for learning
+        try:
+            from agents.trade_logger import log_trade_outcome
+            log_trade_outcome(
+                symbol=symbol, direction="long", entry_price=entry, exit_price=price,
+                entry_time=self._state.get(symbol, {}).get("first_seen", datetime.now()).isoformat(),
+                exit_time=datetime.now().isoformat(),
+                pnl_pct=pnl_pct * 100, pnl_usd=pnl_usd,
+                hold_minutes=hold_hours * 60, exit_reason=reason,
+            )
+        except Exception as e:
+            logger.debug(f"Trade log failed: {e}")
+
         # Close on Alpaca
         headers = {"APCA-API-KEY-ID": self.alpaca_key, "APCA-API-SECRET-KEY": self.alpaca_secret}
         async with httpx.AsyncClient(timeout=10) as client:
