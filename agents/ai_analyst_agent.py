@@ -18,7 +18,9 @@ from agents.events import SignalBundle, TradeProposal, Direction
 from agents.scoring import SignalScorer
 
 
-ANALYST_PROMPT = """{symbol} ${price:,.0f} RSI={rsi:.0f} F&G={fear_greed} EMA={ema_aligned} MACD={macd_hist:+.3f} BB={bb_pos:.1f} Vol={vol_ratio:.1f}x Score={pre_score:.0f}/100
+ANALYST_PROMPT = """{symbol} ${price:,.0f} RSI={rsi:.0f} F&G={fear_greed} EMA={ema_aligned} MACD={macd_hist:+.3f} BB={bb_pos:.1f} Vol={vol_ratio:.1f}x Regime={regime} MarketChange={market_change:+.1f}% Score={pre_score:.0f}/100
+
+If MarketChange>+2% and F&G<25, this is fear+green=strong buy signal. If regime=bull_trend, prefer long.
 
 JSON only: {{"direction":"long/short/flat","score":0-100,"ai_confidence":0.0-1.0,"rationale":"one sentence"}}"""
 
@@ -44,7 +46,7 @@ class AIAnalystAgent:
         onchain_score = self.scorer.score_onchain(bundle.on_chain) if bundle.on_chain else 50
         pre_score, breakdown = self.scorer.composite_score(tech_score, sent_score, onchain_score)
 
-        # Build concise prompt (Qwen3 works best with short, focused input)
+        # Build concise prompt with ALL data signals
         stop_distance = market.price * tech.atr_14_pct * 1.5 if tech.atr_14_pct > 0 else market.price * 0.03
         prompt = ANALYST_PROMPT.format(
             symbol=symbol,
@@ -55,6 +57,8 @@ class AIAnalystAgent:
             macd_hist=tech.macd_histogram,
             bb_pos=tech.bb_position,
             vol_ratio=tech.volume_ratio,
+            regime=market.regime.value,
+            market_change=market.price_change_24h_pct,
             pre_score=pre_score,
         )
 
