@@ -62,7 +62,7 @@ class SignalForgeOrchestrator:
         self.execution = ExecutionAgent(self.bus, config)
         self.monitor = MonitorAgent(self.bus, settings.database_path)
         self.learning = LearningAgent(self.bus, settings.database_path)
-        self.whale_trigger = WhaleTrigger(on_signal=self._on_whale_signal)
+        self.whale_trigger = WhaleTrigger(event_bus=self.bus, on_signal=self._on_whale_signal)
         self.chart_patterns = ChartPatternAgent(self.bus)
         self.regime = RegimeAdaptiveEngine(settings.database_path)
 
