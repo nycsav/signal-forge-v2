@@ -25,6 +25,7 @@ from agents.execution_agent import ExecutionAgent
 from agents.monitor_agent import MonitorAgent
 from agents.learning_agent import LearningAgent
 from agents.regime_engine import RegimeAdaptiveEngine
+from agents.whale_trigger import WhaleTrigger
 from agents.scoring import SignalScorer
 from db.repository import Repository
 from dashboard.app import app as dashboard_app
@@ -59,6 +60,7 @@ class SignalForgeOrchestrator:
         self.execution = ExecutionAgent(self.bus, config)
         self.monitor = MonitorAgent(self.bus, settings.database_path)
         self.learning = LearningAgent(self.bus, settings.database_path)
+        self.whale_trigger = WhaleTrigger(on_signal=self._on_whale_signal)
         self.regime = RegimeAdaptiveEngine(settings.database_path)
 
         # Orchestrator state for bundle assembly
@@ -104,6 +106,24 @@ class SignalForgeOrchestrator:
 
     async def _on_onchain(self, event: OnChainEvent):
         self._latest_onchain[event.symbol] = event
+
+    async def _on_whale_signal(self, signal: dict):
+        """Whale activity detected → trigger immediate market scan."""
+        direction = signal.get("direction", "neutral")
+        strength = signal.get("strength", 0)
+        reason = signal.get("reason", "")
+
+        logger.warning(f"WHALE TRIGGER: {direction.upper()} (strength {strength}/5) — {reason}")
+        logger.info("Triggering immediate market scan...")
+
+        # Force an immediate scan cycle
+        try:
+            await self.market_data._scan_all()
+        except Exception as e:
+            logger.error(f"Whale-triggered scan failed: {e}")
+
+        # Log the event
+        self.repo.log_event("whale_trigger", f"whale_{direction}", None, signal)
 
     async def _try_assemble_bundle(self, symbol: str):
         market = self._market_states.get(symbol)
@@ -177,6 +197,7 @@ class SignalForgeOrchestrator:
             asyncio.create_task(self.monitor.run_monitor_loop(
                 interval_seconds=settings.monitor_interval_seconds
             )),
+            asyncio.create_task(self.whale_trigger.run_forever()),  # 60s whale monitoring
         ]
 
         # Dashboard runs separately on port 8888 (dashboard_server.py)
