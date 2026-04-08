@@ -19,7 +19,7 @@ MIN_ORDER_USD = 10.00           # Below this, fees kill you
 # ── Entry: lower bar in extreme fear, signal quality still matters ──
 MIN_SIGNAL_SCORE = 55           # Lower bar — the edge IS the fear
 MIN_AI_CONFIDENCE = 0.50        # At least one model confident
-REQUIRE_CONSENSUS = False       # Consensus PREFERRED (+15% size boost) but not required
+REQUIRE_CONSENSUS = True        # Consensus REQUIRED — both AI models must agree
 REQUIRE_FIB_CONFLUENCE = False  # Fib confluence PREFERRED (+15% size boost) but not gating
 
 # ── Conviction Bonuses: reward quality signals with bigger size ──

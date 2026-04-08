@@ -101,6 +101,21 @@ class SignalBundle(BaseModel):
     max_allowed_confidence: float = 1.0  # RiskAgent reads this
 
 
+# ── CHART PATTERN EVENTS ──────────────────────────────────────
+
+class PatternEvent(BaseModel):
+    """Emitted by ChartPatternAgent when a pattern is detected."""
+    timestamp: datetime
+    symbol: str
+    pattern_type: str        # "inverse_head_shoulders", "head_shoulders", "double_bottom"
+    breakout_direction: str  # "bullish" or "bearish"
+    confidence: float        # 0.0-1.0 geometric confidence
+    target_price: float      # Measured move target
+    neckline_price: float    # Key level to watch
+    current_price: float
+    candles_used: int
+
+
 # ── AI ANALYST → RISK AGENT ───────────────────────────────────
 
 class TradeProposal(BaseModel):

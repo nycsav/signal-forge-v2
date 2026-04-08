@@ -27,6 +27,7 @@ from agents.monitor_agent import MonitorAgent
 from agents.learning_agent import LearningAgent
 from agents.regime_engine import RegimeAdaptiveEngine
 from agents.whale_trigger import WhaleTrigger
+from agents.chart_pattern_agent import ChartPatternAgent
 from agents.scoring import SignalScorer
 from db.repository import Repository
 from dashboard.app import app as dashboard_app
@@ -62,6 +63,7 @@ class SignalForgeOrchestrator:
         self.monitor = MonitorAgent(self.bus, settings.database_path)
         self.learning = LearningAgent(self.bus, settings.database_path)
         self.whale_trigger = WhaleTrigger(on_signal=self._on_whale_signal)
+        self.chart_patterns = ChartPatternAgent(self.bus)
         self.regime = RegimeAdaptiveEngine(settings.database_path)
 
         # Orchestrator state for bundle assembly
@@ -225,6 +227,7 @@ class SignalForgeOrchestrator:
                 interval_seconds=settings.monitor_interval_seconds
             )),
             asyncio.create_task(self.whale_trigger.run_forever()),  # 60s whale monitoring
+            asyncio.create_task(self.chart_patterns.run_forever(interval_seconds=14400)),  # 4h pattern scan
         ]
 
         # Dashboard runs separately on port 8888 (dashboard_server.py)
