@@ -54,7 +54,7 @@ class LiveEngine:
         logger.info(f"Stop: {rules.STOP_LOSS_PCT*100}% | TP1: +{rules.TP1_PCT*100}% | TP2: +{rules.TP2_PCT*100}%")
 
     async def run(self):
-        logger.info("Live Engine starting scan loop (15 min interval)...")
+        logger.info("Live Engine starting scan loop (5 min interval)...")
         self.repo.log("engine", "Live engine started" + (" (DRY RUN)" if self.dry_run else ""))
 
         # Warm up technical indicators
@@ -66,7 +66,7 @@ class LiveEngine:
             except Exception as e:
                 logger.error(f"Live scan error: {e}")
                 self.repo.log("error", str(e))
-            await asyncio.sleep(900)  # 15 min
+            await asyncio.sleep(300)  # 5 min
 
     async def _scan_cycle(self):
         # Check halt

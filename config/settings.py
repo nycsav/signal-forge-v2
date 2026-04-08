@@ -42,8 +42,8 @@ class Settings(BaseSettings):
 
     # Trading parameters
     min_signal_score: float = 55.0
-    scan_interval_seconds: int = 900
-    monitor_interval_seconds: int = 300
+    scan_interval_seconds: int = 300   # 5 min scan (was 15 min)
+    monitor_interval_seconds: int = 120  # 2 min exit checks (was 5 min)
     max_open_positions: int = 5
 
     # Watchlist — Top 50 by market cap
