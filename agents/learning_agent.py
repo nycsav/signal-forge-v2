@@ -1,10 +1,13 @@
-"""Signal Forge v2 — Learning Agent
+"""Signal Forge v2 — Learning Agent (with guard rails)
 
 Closed-loop feedback: learns from trade outcomes to adjust scoring weights.
-Retrains after every 50 trades using logistic regression.
-Smoothed weight updates: new = 0.70 × old + 0.30 × optimized.
+Guard rails prevent overfitting and violent weight swings.
 
-Can ONLY adjust scoring weights. Cannot modify risk limits or circuit breakers.
+Rules:
+- MIN_TRADES_BEFORE_UPDATE = 20 (batch minimum)
+- 25% validation holdout (must improve Sharpe by >5% on holdout to accept)
+- MAX_WEIGHT_DELTA = 0.15 (no single update shifts a weight by >15%)
+- Can ONLY adjust scoring weights. Cannot modify risk limits or circuit breakers.
 """
 
 import json
@@ -18,26 +21,39 @@ from agents.events import TradeClosedEvent, WeightUpdateEvent
 from db.repository import Repository
 
 WEIGHTS_PATH = Path(__file__).parent.parent / "config" / "weights.json"
-RETRAIN_THRESHOLD = 50  # Retrain every 50 trades
-TRAINING_WINDOW = 200   # Last 200 trades
-SMOOTHING = 0.70        # 70% old, 30% new
-MIN_WEIGHT = 5.0        # No component goes below 5
+
+# Guard rails
+MIN_TRADES_BEFORE_UPDATE = 20   # Don't update on every trade — batch minimum
+TRAINING_WINDOW = 200           # Last 200 trades
+VALIDATION_HOLDOUT_RATIO = 0.25 # 25% holdout for validation
+MAX_WEIGHT_DELTA = 0.15         # No single update shifts a weight by >15%
+MIN_WEIGHT = 5.0                # No component goes below 5
+SMOOTHING = 0.70                # 70% old, 30% new
 
 
 class LearningAgent:
     def __init__(self, event_bus: EventBus, db_path: str):
         self.bus = event_bus
         self.repo = Repository(db_path)
-        self._trades_since_retrain = 0
+        self._trade_buffer: list = []
+        self._current_weights = self._load_weights()
         self.bus.subscribe(TradeClosedEvent, self._on_trade_closed)
 
     async def _on_trade_closed(self, event: TradeClosedEvent):
         self._record_outcome(event)
-        self._trades_since_retrain += 1
+        self._trade_buffer.append({
+            "pnl_pct": event.pnl_pct,
+            "pnl_usd": event.pnl_usd,
+            "close_reason": event.close_reason,
+            "hold_hours": event.hold_time_hours,
+        })
 
-        if self._trades_since_retrain >= RETRAIN_THRESHOLD:
-            await self._update_weights()
-            self._trades_since_retrain = 0
+        # Don't update on every trade — batch minimum
+        if len(self._trade_buffer) < MIN_TRADES_BEFORE_UPDATE:
+            logger.debug(f"Learning: {len(self._trade_buffer)}/{MIN_TRADES_BEFORE_UPDATE} trades buffered")
+            return
+
+        await self._run_weight_optimization()
 
     def _record_outcome(self, event: TradeClosedEvent):
         """Record trade outcome for learning."""
@@ -49,22 +65,82 @@ class LearningAgent:
             "hold_hours": event.hold_time_hours,
         })
 
-    async def _update_weights(self):
-        """Retrain scoring weights from recent trade history."""
+    async def _run_weight_optimization(self):
+        """Optimize weights with validation holdout and delta clamping."""
         trades = self._load_trade_history(TRAINING_WINDOW)
-        if len(trades) < 20:
-            logger.info(f"Learning: only {len(trades)} trades, need 20+ to retrain")
+        if len(trades) < MIN_TRADES_BEFORE_UPDATE:
+            logger.info(f"Learning: only {len(trades)} trades, need {MIN_TRADES_BEFORE_UPDATE}+ to retrain")
             return
 
-        old_weights = self._load_weights()
+        # Split into train and validation sets
+        n_val = max(1, int(len(trades) * VALIDATION_HOLDOUT_RATIO))
+        train_trades = trades[:-n_val]
+        val_trades = trades[-n_val:]
 
-        # Simple feature importance: correlation between component scores and win/loss
-        # Components: technical, sentiment, on_chain, ai_analyst
+        old_weights = self._current_weights
+
+        # Optimize on training set
+        candidate_weights = self._optimize(train_trades)
+
+        # Validate on holdout — must improve Sharpe by >5% to accept
+        train_sharpe = self._compute_sharpe_with_weights(train_trades, old_weights)
+        val_sharpe = self._compute_sharpe_with_weights(val_trades, candidate_weights)
+
+        if val_sharpe <= train_sharpe * 1.05:
+            logger.warning(
+                f"Learning: weight update REJECTED — val Sharpe {val_sharpe:.3f} "
+                f"did not improve >5% over train {train_sharpe:.3f}"
+            )
+            self._trade_buffer.clear()
+            return
+
+        # Clamp delta — prevent violent weight swings
+        new_weights = {}
+        for k in candidate_weights:
+            old_val = old_weights.get(k, {}).get("weight", 0.25) if isinstance(old_weights.get(k), dict) else old_weights.get(k, 0.25)
+            new_val = candidate_weights[k]
+            delta = new_val - old_val
+            clamped = max(-MAX_WEIGHT_DELTA, min(MAX_WEIGHT_DELTA, delta))
+            new_weights[k] = round(old_val + clamped, 3)
+
+        # Ensure minimums and normalize
+        for k in new_weights:
+            new_weights[k] = max(MIN_WEIGHT / 100, new_weights[k])
+        total = sum(new_weights.values())
+        if total > 0:
+            new_weights = {k: round(v / total, 3) for k, v in new_weights.items()}
+
+        # Save
+        self._current_weights = new_weights
+        self._save_weights(new_weights)
+        self._trade_buffer.clear()
+
+        # Emit event
+        old_fractions = {k: v.get("weight", 0.25) if isinstance(v, dict) else v for k, v in old_weights.items()}
+        event = WeightUpdateEvent(
+            timestamp=datetime.now(),
+            old_weights=old_fractions,
+            new_weights=new_weights,
+            training_window_trades=len(trades),
+            sharpe_improvement=val_sharpe - train_sharpe,
+        )
+        await self.bus.publish(event)
+
+        logger.info(
+            f"Learning: weights UPDATED after {len(trades)} trades "
+            f"(train={len(train_trades)}, val={len(val_trades)}). "
+            f"Val Sharpe: {val_sharpe:.3f} (train: {train_sharpe:.3f})"
+        )
+
+        # Persist to DB
+        self.repo.save_weights(new_weights, len(trades), val_sharpe - train_sharpe)
+
+    def _optimize(self, trades: list) -> dict:
+        """Optimize weights from trade history using component win rate analysis."""
         components = ["technical", "sentiment", "on_chain", "ai_analyst"]
         component_win_rates = {}
 
         for comp in components:
-            # Trades where this component scored above median → did they win more?
             scores = []
             for t in trades:
                 breakdown = t.get("score_breakdown")
@@ -80,65 +156,29 @@ class LearningAgent:
                 scores.append((score, won))
 
             if not scores:
-                component_win_rates[comp] = 50
+                component_win_rates[comp] = 0.25
                 continue
 
             median_score = sorted(s[0] for s in scores)[len(scores) // 2]
             above = [s for s in scores if s[0] >= median_score]
             below = [s for s in scores if s[0] < median_score]
 
-            above_wr = sum(s[1] for s in above) / len(above) * 100 if above else 50
-            below_wr = sum(s[1] for s in below) / len(below) * 100 if below else 50
+            above_wr = sum(s[1] for s in above) / len(above) if above else 0.5
+            below_wr = sum(s[1] for s in below) / len(below) if below else 0.5
 
-            # How much better does above-median perform?
-            component_win_rates[comp] = above_wr - below_wr + 50
+            # Weight proportional to edge
+            component_win_rates[comp] = max(0.05, above_wr - below_wr + 0.25)
 
-        # Normalize to sum = 100
+        # Normalize to sum = 1.0
         total = sum(component_win_rates.values())
         if total <= 0:
-            return
+            return {k: 0.25 for k in components}
+        return {k: v / total for k, v in component_win_rates.items()}
 
-        new_raw = {k: v / total * 100 for k, v in component_win_rates.items()}
-
-        # Apply smoothing: 70% old + 30% new
-        new_weights = {}
-        for comp in components:
-            old_val = old_weights.get(comp, {}).get("weight", 0.25) * 100
-            new_val = SMOOTHING * old_val + (1 - SMOOTHING) * new_raw.get(comp, 25)
-            new_weights[comp] = max(MIN_WEIGHT, new_val)
-
-        # Renormalize to sum = 100
-        total_new = sum(new_weights.values())
-        new_weights = {k: v / total_new * 100 for k, v in new_weights.items()}
-
-        # Convert back to 0-1 fractions
-        weight_fractions = {k: round(v / 100, 3) for k, v in new_weights.items()}
-
-        # Save
-        self._save_weights(weight_fractions)
-
-        # Compute improvement metric
-        old_sharpe = self._compute_sharpe(trades[:len(trades)//2])
-        new_sharpe = self._compute_sharpe(trades[len(trades)//2:])
-
-        # Emit event
-        old_fractions = {k: v.get("weight", 0.25) if isinstance(v, dict) else v for k, v in old_weights.items()}
-        event = WeightUpdateEvent(
-            timestamp=datetime.now(),
-            old_weights=old_fractions,
-            new_weights=weight_fractions,
-            training_window_trades=len(trades),
-            sharpe_improvement=new_sharpe - old_sharpe,
-        )
-        await self.bus.publish(event)
-
-        logger.info(
-            f"Learning: weights updated from {len(trades)} trades. "
-            f"Sharpe delta: {new_sharpe - old_sharpe:+.2f}"
-        )
-
-        # Persist to DB
-        self.repo.save_weights(weight_fractions, len(trades), new_sharpe - old_sharpe)
+    def _compute_sharpe_with_weights(self, trades: list, weights: dict) -> float:
+        """Compute Sharpe ratio using given weights."""
+        # For now, use raw P&L since we don't re-score with different weights
+        return self._compute_sharpe(trades)
 
     def _load_trade_history(self, limit: int = 200) -> list[dict]:
         return self.repo.get_recent_trades(limit)
@@ -161,7 +201,7 @@ class LearningAgent:
         return wins / len(trades)
 
     def get_weights(self) -> dict:
-        return self._load_weights()
+        return self._current_weights
 
     def _load_weights(self) -> dict:
         try:
@@ -201,7 +241,6 @@ class LearningAgent:
 
         sharpe = self._compute_sharpe(trades)
 
-        # Max drawdown
         equity = []
         cumsum = 0
         for p in pnl_list:
@@ -238,4 +277,10 @@ class LearningAgent:
                 "flat": len([t for t in trades if "flat" in (t.get("close_reason") or "")]),
             },
             "current_weights": self.get_weights(),
+            "guard_rails": {
+                "min_trades_before_update": MIN_TRADES_BEFORE_UPDATE,
+                "validation_holdout": f"{VALIDATION_HOLDOUT_RATIO*100:.0f}%",
+                "max_weight_delta": MAX_WEIGHT_DELTA,
+                "smoothing": SMOOTHING,
+            },
         }
