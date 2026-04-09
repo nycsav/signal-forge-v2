@@ -94,12 +94,14 @@ class SignalForgeOrchestrator:
             open_positions=len(self.repo.get_open_trades()),
         )
 
-        # Log to DB
+        # Log to DB — use RegimeEngine's canonical classification, not the raw
+        # MarketDataAgent directional enum. RegimeEngine is the single source
+        # of truth for regime state (see CLAUDE.md §2).
         self.repo.save_snapshot(
             symbol=event.symbol,
             price=event.price,
             fear_greed=event.fear_greed_index,
-            market_regime=event.regime.value,
+            market_regime=self.regime.params.regime,
         )
 
     async def _on_technical(self, event: TechnicalEvent):

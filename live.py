@@ -85,6 +85,7 @@ class LiveEngine:
         self.halted = False
         self.trades_today = 0
         self._bearish_block_until: float = 0  # timestamp when bearish block expires
+        self._last_bearish_usd: float = 0     # USD size of the whale that set the block
         self._whale_confidence_boost: float = 0  # temporary confidence boost from bullish whale
 
         # Orchestrator state for bundle assembly (same as main.py)
@@ -125,11 +126,12 @@ class LiveEngine:
             open_positions=len(self.repo.get_open_trades()),
         )
 
+        # Use RegimeEngine's canonical classification (see CLAUDE.md §2)
         self.repo.save_snapshot(
             symbol=event.symbol,
             price=event.price,
             fear_greed=event.fear_greed_index,
-            market_regime=event.regime.value,
+            market_regime=self.regime.params.regime,
         )
 
     async def _on_technical(self, event: TechnicalEvent):
@@ -241,31 +243,50 @@ class LiveEngine:
 
         Bearish whale → set 12hr buy block, do NOT scan.
         Bullish whale → boost confidence 20%, then scan.
+        Bullish override: a larger, strength>=3 bullish event CLEARS an
+        existing bearish block (smart money reversing direction).
         """
         direction = signal.get("direction", "neutral")
         strength = signal.get("strength", 0)
         reason = signal.get("reason", "")
+        usd = float(signal.get("usd_value", 0) or 0)
 
         if direction == "bearish":
             self._bearish_block_until = time.time() + WHALE_BEARISH_BLOCK_SECONDS
+            self._last_bearish_usd = usd
             hours = WHALE_BEARISH_BLOCK_SECONDS / 3600
             logger.warning(
-                f"LIVE WHALE BEARISH (str={strength}/5): {reason} — "
+                f"LIVE WHALE BEARISH (str={strength}/5, ${usd/1e6:.1f}m): {reason} — "
                 f"BLOCKING new buys for {hours:.0f}h"
             )
             self.live_repo.log("whale_bearish_block",
-                f"Bearish whale detected, blocking buys for {hours:.0f}h: {reason}",
+                f"Bearish whale (${usd/1e6:.1f}m), blocking buys for {hours:.0f}h: {reason}",
                 data=signal)
             # Do NOT trigger scan on bearish whale
             return
 
         elif direction == "bullish":
+            # Override check: if a bearish block is active, a larger
+            # bullish event with strength>=3 clears it (smart money flip).
+            block_active = time.time() < self._bearish_block_until
+            if block_active and strength >= 3 and usd > self._last_bearish_usd:
+                logger.warning(
+                    f"Bullish whale (${usd/1e6:.1f}m) overrides bearish block "
+                    f"(prior ${self._last_bearish_usd/1e6:.1f}m) — clearing block"
+                )
+                self.live_repo.log("whale_bullish_override",
+                    f"Bullish whale ${usd/1e6:.1f}m overrides bearish block "
+                    f"(${self._last_bearish_usd/1e6:.1f}m): {reason}",
+                    data=signal)
+                self._bearish_block_until = 0
+                self._last_bearish_usd = 0
+
             logger.warning(
-                f"LIVE WHALE BULLISH (str={strength}/5): {reason} — "
+                f"LIVE WHALE BULLISH (str={strength}/5, ${usd/1e6:.1f}m): {reason} — "
                 f"boosting confidence +20%, triggering scan"
             )
             self.live_repo.log("whale_bullish_boost",
-                f"Bullish whale detected, +20% confidence boost: {reason}",
+                f"Bullish whale (${usd/1e6:.1f}m), +20% confidence boost: {reason}",
                 data=signal)
             # Trigger immediate scan via market data agent
             try:
