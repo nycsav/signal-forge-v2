@@ -46,6 +46,10 @@ class RiskAgent:
     WEEKLY_LOSS_LIMIT = 0.10         # 10%
     MIN_SIGNAL_SCORE = 62
     MIN_AI_CONFIDENCE = 0.62
+    # Absolute floors — RegimeEngine can lower instance MIN_SIGNAL_SCORE/MIN_AI_CONFIDENCE
+    # for sizing logic, but the threshold checks below ALWAYS enforce these floors.
+    MIN_SIGNAL_SCORE_FLOOR = 62
+    MIN_AI_CONFIDENCE_FLOOR = 0.62
     MAX_SAME_GROUP = 3               # Max per sector (spec: 3)
     MIN_RISK_REWARD = 2.0
 
@@ -129,13 +133,15 @@ class RiskAgent:
     # ── Risk Checks ──
 
     def _check_signal_threshold(self, p: TradeProposal) -> tuple[bool, str]:
-        if p.raw_score < self.MIN_SIGNAL_SCORE:
-            return False, f"Score {p.raw_score:.0f} < minimum {self.MIN_SIGNAL_SCORE}"
+        threshold = max(self.MIN_SIGNAL_SCORE_FLOOR, self.MIN_SIGNAL_SCORE)
+        if p.raw_score < threshold:
+            return False, f"Score {p.raw_score:.0f} < minimum {threshold} (floor={self.MIN_SIGNAL_SCORE_FLOOR})"
         return True, ""
 
     def _check_ai_confidence(self, p: TradeProposal) -> tuple[bool, str]:
-        if p.ai_confidence < self.MIN_AI_CONFIDENCE:
-            return False, f"AI confidence {p.ai_confidence:.2f} < minimum {self.MIN_AI_CONFIDENCE}"
+        threshold = max(self.MIN_AI_CONFIDENCE_FLOOR, self.MIN_AI_CONFIDENCE)
+        if p.ai_confidence < threshold:
+            return False, f"AI confidence {p.ai_confidence:.2f} < minimum {threshold:.2f} (floor={self.MIN_AI_CONFIDENCE_FLOOR})"
         return True, ""
 
     def _check_position_count(self) -> tuple[bool, str]:
