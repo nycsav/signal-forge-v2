@@ -16,7 +16,7 @@ from loguru import logger
 import httpx
 
 from config.settings import settings
-from config import live_rules
+from agents.risk_agent import RiskAgent
 from db.live_repository import LiveRepository
 from agents.trending_trader import TrendingTrader
 
@@ -105,7 +105,7 @@ class DualTracker:
                     logger.info(f"  PAPER (dry): would buy {paper_qty:.6f} {symbol} @ ${price:,.4f} (${paper_size:,.0f})")
 
             # ── Live trade ($300 account) ──
-            live_size = 300 * live_rules.MAX_POSITION_PCT  # 15% = $45
+            live_size = 300 * RiskAgent.MAX_POSITION_PCT  # Uses RiskAgent sizing
             live_qty = live_size / price if price > 0 else 0
 
             # Apply conviction bonuses
@@ -113,7 +113,7 @@ class DualTracker:
                 live_size *= 1.15  # +15% for high conviction
                 live_qty = live_size / price
 
-            if live_qty > 0 and live_size >= live_rules.MIN_ORDER_USD:
+            if live_qty > 0 and live_size >= 10.00:  # Min order $10
                 self.live_repo.open_trade(
                     symbol=symbol, side="buy", entry_price=price,
                     quantity=live_qty, size_usd=live_size,

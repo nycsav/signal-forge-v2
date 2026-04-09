@@ -1,375 +1,322 @@
 #!/usr/bin/env python3
-"""Signal Forge v2 — Live Trading Engine
+"""Signal Forge v2 — Live Trading Engine (Refactored)
 
-Runs alongside paper (main.py). Shares the same AI brain, data sources, and
-learning framework. Uses its own database (live_trades.db) and strict rules.
+Uses the SAME agent pipeline as main.py:
+  EventBus → MarketData → Technical → AIAnalyst → RiskAgent → ExecutionAgent → MonitorAgent
+
+All thresholds come from RiskAgent (MIN_SIGNAL_SCORE=62, MIN_AI_CONFIDENCE=0.62).
+No inline threshold checks. RiskAgent is the single source of truth.
 
 Usage:
   PYTHONPATH=. python live.py              # Start live engine
   PYTHONPATH=. python live.py --dry-run    # Simulate without placing real orders
-
-The paper engine (main.py) keeps running via launchd daemon.
-Both feed into the Learning Agent.
 """
 
 import asyncio
 import signal as sig
 import argparse
+import time
 from datetime import datetime
 from loguru import logger
 
 from config.settings import settings
-from config import live_rules as rules
 from db.live_repository import LiveRepository
+from db.repository import Repository
 from data import coinbase_client, fear_greed_client
-from data.alpaca_client import AlpacaClient
 from agents.event_bus import EventBus
-from agents.events import MarketStateEvent, TechnicalEvent, SignalBundle, Direction
+from agents.events import (
+    MarketStateEvent, TechnicalEvent, SentimentEvent, OnChainEvent,
+    SignalBundle, TradeProposal, RiskAssessmentEvent, RiskDecision, Direction,
+)
+from agents.market_data_agent import MarketDataAgent
 from agents.technical_agent import TechnicalAgent
+from agents.sentiment_agent import SentimentAgent
+from agents.onchain_agent import OnChainAgent
 from agents.ai_analyst_agent import AIAnalystAgent
+from agents.risk_agent import RiskAgent
+from agents.execution_agent import ExecutionAgent
+from agents.monitor_agent import MonitorAgent
 from agents.scoring import SignalScorer
-from agents.fibonacci import multi_timeframe_fib
-import httpx
+from agents.regime_engine import RegimeAdaptiveEngine
+from agents.whale_trigger import WhaleTrigger
+
+
+# Live watchlist — only the most liquid
+LIVE_WATCHLIST = ["BTC-USD", "ETH-USD", "SOL-USD"]
+
+# Live-specific constants (not thresholds — those come from RiskAgent)
+STARTING_CAPITAL = 300.00
+DAILY_LOSS_LIMIT_USD = 15.00      # 5% of $300
+DAILY_LOSS_LIMIT_PCT = 0.05
+MAX_TRADES_PER_DAY = 5
+WHALE_BEARISH_BLOCK_SECONDS = 43200  # 12 hours
 
 
 class LiveEngine:
+    """Live trading engine using the identical agent pipeline as main.py.
+
+    Pipeline: EventBus → AIAnalyst → RiskAgent → ExecutionAgent → MonitorAgent
+    """
+
     def __init__(self, dry_run: bool = False):
         self.dry_run = dry_run
-        self.repo = LiveRepository()
+        self.live_repo = LiveRepository()
         self.bus = EventBus()
+        self.repo = Repository(settings.database_path)
         self.scorer = SignalScorer()
+
+        config = settings.model_dump()
+
+        # ── Same agents as main.py ──
+        self.market_data = MarketDataAgent(self.bus, config)
         self.technical = TechnicalAgent(self.bus)
-        self.alpaca = AlpacaClient(
-            api_key=settings.alpaca_api_key,
-            api_secret=settings.alpaca_secret_key or settings.alpaca_api_secret,
-            base_url=settings.alpaca_base_url,
-        )
-        self.balance = rules.STARTING_CAPITAL
+        self.sentiment = SentimentAgent(self.bus, config)
+        self.onchain = OnChainAgent(self.bus, config)
+        self.ai_analyst = AIAnalystAgent(self.bus, config, self.scorer)
+        self.risk = RiskAgent(self.bus, settings.database_path, settings.portfolio_value)
+        self.execution = ExecutionAgent(self.bus, config)
+        self.monitor = MonitorAgent(self.bus, settings.database_path)
+        self.regime = RegimeAdaptiveEngine(settings.database_path)
+
+        # Whale trigger with direction-aware callback
+        self.whale_trigger = WhaleTrigger(event_bus=self.bus, on_signal=self._on_whale_signal)
+
+        # Live-specific state
         self.halted = False
         self.trades_today = 0
+        self._bearish_block_until: float = 0  # timestamp when bearish block expires
+        self._whale_confidence_boost: float = 0  # temporary confidence boost from bullish whale
+
+        # Orchestrator state for bundle assembly (same as main.py)
+        self._market_states: dict = {}
+        self._technical_states: dict = {}
+        self._latest_sentiment: dict = {}
+        self._latest_onchain: dict = {}
+        self._last_sentiment_ts: datetime = datetime.now()
+        self._last_onchain_ts: datetime = datetime.now()
+
+        # Subscribe orchestrator to assemble SignalBundles (same as main.py)
+        self.bus.subscribe(MarketStateEvent, self._on_market_state)
+        self.bus.subscribe(TechnicalEvent, self._on_technical)
+        self.bus.subscribe(SentimentEvent, self._on_sentiment)
+        self.bus.subscribe(OnChainEvent, self._on_onchain)
+
+        # Subscribe to risk decisions to log in live_repo
+        self.bus.subscribe(RiskAssessmentEvent, self._on_risk_decision)
 
         logger.info(f"Live Engine initialized — {'DRY RUN' if dry_run else 'REAL MONEY'}")
-        logger.info(f"Capital: ${rules.STARTING_CAPITAL} | Coins: {rules.WATCHLIST}")
-        logger.info(f"Max position: {rules.MAX_POSITION_PCT*100}% | Max positions: {rules.MAX_OPEN_POSITIONS}")
-        logger.info(f"Stop: {rules.STOP_LOSS_PCT*100}% | TP1: +{rules.TP1_PCT*100}% | TP2: +{rules.TP2_PCT*100}%")
+        logger.info(f"Pipeline: EventBus → AIAnalyst → RiskAgent → ExecutionAgent → MonitorAgent")
+        logger.info(f"Thresholds from RiskAgent: score>={self.risk.MIN_SIGNAL_SCORE}, "
+                     f"confidence>={self.risk.MIN_AI_CONFIDENCE}")
+        logger.info(f"Watchlist: {LIVE_WATCHLIST}")
 
-    async def run(self):
-        logger.info("Live Engine starting scan loop (5 min interval + 60s whale trigger)...")
-        self.repo.log("engine", "Live engine started" + (" (DRY RUN)" if self.dry_run else ""))
+    # ── Event handlers (identical to main.py orchestrator) ──
 
-        # Start whale trigger in background
-        from agents.whale_trigger import WhaleTrigger
-        self._whale = WhaleTrigger(on_signal=self._on_whale_signal)
-        asyncio.create_task(self._whale.run_forever())
+    async def _on_market_state(self, event: MarketStateEvent):
+        self._market_states[event.symbol] = event
 
-        # Warm up technical indicators
-        await self.technical.warmup(rules.WATCHLIST)
+        perf = self.repo.get_performance_stats(7)
+        win_rate = perf.get("win_rate", 50) / 100
+        self.regime.update(
+            fear_greed=event.fear_greed_index,
+            market_regime=event.regime,
+            avg_atr_pct=event.atr_14 / event.price if event.price > 0 and event.atr_14 > 0 else 0.03,
+            recent_win_rate=win_rate,
+            open_positions=len(self.repo.get_open_trades()),
+        )
 
-        while True:
-            try:
-                await self._scan_cycle()
-            except Exception as e:
-                logger.error(f"Live scan error: {e}")
-                self.repo.log("error", str(e))
-            await asyncio.sleep(300)  # 5 min
+        self.repo.save_snapshot(
+            symbol=event.symbol,
+            price=event.price,
+            fear_greed=event.fear_greed_index,
+            market_regime=event.regime.value,
+        )
 
-    async def _scan_cycle(self):
-        # Check halt
-        halted, reason = self.repo.check_daily_halt(rules.DAILY_LOSS_LIMIT_USD)
-        if halted:
-            logger.warning(f"LIVE HALTED: {reason}")
-            self.repo.log("halt", reason)
-            self.halted = True
+    async def _on_technical(self, event: TechnicalEvent):
+        self._technical_states[event.symbol] = event
+        await self._try_assemble_bundle(event.symbol)
+
+    async def _on_sentiment(self, event: SentimentEvent):
+        self._latest_sentiment[event.symbol] = event
+        self._last_sentiment_ts = datetime.now()
+
+    async def _on_onchain(self, event: OnChainEvent):
+        self._latest_onchain[event.symbol] = event
+        self._last_onchain_ts = datetime.now()
+
+    async def _try_assemble_bundle(self, symbol: str):
+        """Assemble SignalBundle and publish — identical logic to main.py."""
+        from datetime import timedelta
+        MAX_SENTIMENT_AGE = timedelta(minutes=30)
+        MAX_ONCHAIN_AGE = timedelta(hours=2)
+
+        market = self._market_states.get(symbol)
+        technical = self._technical_states.get(symbol)
+
+        if not (market and technical):
             return
 
-        # Check trade count limit
-        if self.trades_today >= rules.MAX_TRADES_PER_DAY:
-            logger.info(f"Daily trade limit reached ({self.trades_today}/{rules.MAX_TRADES_PER_DAY})")
+        # Only process live watchlist symbols
+        if symbol not in LIVE_WATCHLIST:
             return
 
-        # Get account balance
-        account = await self.alpaca.get_account()
-        if account:
-            self.balance = account.get("portfolio_value", self.balance)
-
-        # Get positions
-        positions = await self.alpaca.get_positions()
-        open_count = len(positions)
-
-        # Monitor existing positions for exits
-        for pos in positions:
-            await self._check_exits(pos)
-
-        # Don't open new if at max
-        if open_count >= rules.MAX_OPEN_POSITIONS:
-            logger.info(f"At max positions ({open_count}/{rules.MAX_OPEN_POSITIONS})")
+        # Check bearish whale block
+        if time.time() < self._bearish_block_until:
+            remaining = (self._bearish_block_until - time.time()) / 3600
+            logger.info(f"Live BLOCKED by bearish whale signal ({remaining:.1f}h remaining) — skipping {symbol}")
+            self.live_repo.log("whale_block", f"Bearish block active, skipping {symbol}")
             return
 
-        # Fetch F&G
-        fg = await fear_greed_client.get_fear_greed()
-        fg_val = fg.get("value", 50)
+        now = datetime.now()
 
-        # Scan watchlist
-        prices = await coinbase_client.get_all_prices(rules.WATCHLIST)
+        sentiment_ts = getattr(self, '_last_sentiment_ts', now)
+        onchain_ts = getattr(self, '_last_onchain_ts', now)
+        sentiment_age = now - sentiment_ts
+        onchain_age = now - onchain_ts
+        sentiment_fresh = sentiment_age <= MAX_SENTIMENT_AGE
+        onchain_fresh = onchain_age <= MAX_ONCHAIN_AGE
 
-        for symbol in rules.WATCHLIST:
-            price = prices.get(symbol, 0)
-            if price <= 0:
-                continue
+        bundle = SignalBundle(
+            timestamp=market.timestamp,
+            symbol=symbol,
+            market_state=market,
+            sentiment=self._latest_sentiment.get(symbol) if sentiment_fresh else None,
+            on_chain=self._latest_onchain.get(symbol) if onchain_fresh else None,
+            technical=technical,
+            sentiment_stale=not sentiment_fresh,
+            onchain_stale=not onchain_fresh,
+            sentiment_age_mins=round(sentiment_age.total_seconds() / 60, 1),
+            onchain_age_hrs=round(onchain_age.total_seconds() / 3600, 1),
+        )
 
-            # Skip if we already hold this coin
-            if any(p["symbol"].replace("USD", "-USD") == symbol or p["symbol"] == symbol.replace("-", "") for p in positions):
-                continue
+        if bundle.sentiment_stale and bundle.onchain_stale:
+            bundle.max_allowed_confidence = 0.65
 
-            # Feed to technical agent
-            self.technical._init_symbol(symbol)
-            ind = self.technical._indicators.get(symbol, {})
-            if ind.get("count", 0) < 30:
-                continue
+        # Score for logging
+        tech_score = self.scorer.score_technical(technical)
+        sent_score = self.scorer.score_sentiment(bundle.sentiment) if bundle.sentiment else 50
+        onchain_score = self.scorer.score_onchain(bundle.on_chain) if bundle.on_chain else 50
+        composite, breakdown = self.scorer.composite_score(tech_score, sent_score, onchain_score)
 
-            # Score — in extreme fear, lower the bar further
-            tech_score = self._quick_tech_score(ind, price)
-            effective_threshold = rules.MIN_SIGNAL_SCORE
-            if fg_val < rules.FEAR_AGGRESSIVE_THRESHOLD:
-                effective_threshold = 50  # More aggressive in extreme fear
-            logger.info(f"Live SCAN {symbol}: tech_score={tech_score:.0f} threshold={effective_threshold}")
-            if tech_score < effective_threshold:
-                continue
+        adaptive_threshold = self.regime.params.score_threshold
 
-            # AI analysis (both models)
-            ai_result = await self._get_ai_consensus(symbol, price, tech_score, fg_val)
-            if not ai_result:
-                continue
+        self.repo.log_signal(
+            timestamp=market.timestamp.isoformat(),
+            symbol=symbol,
+            raw_score=composite,
+            direction=self.scorer.score_to_direction(composite).value,
+            score_breakdown=breakdown,
+            fear_greed=market.fear_greed_index,
+            market_regime=market.regime.value,
+            decision="proposed" if composite >= adaptive_threshold else "skipped",
+        )
 
-            direction = ai_result.get("direction", "flat")
-            confidence = ai_result.get("confidence", 0)
-            consensus = ai_result.get("consensus", False)
-            rationale = ai_result.get("rationale", "")
+        # Pass adaptive parameters to agents (same as main.py)
+        self.ai_analyst._adaptive_threshold = self.regime.params.score_threshold
+        self.risk.MIN_SIGNAL_SCORE = self.regime.params.score_threshold
+        self.risk.MIN_AI_CONFIDENCE = self.regime.params.ai_confidence_min
+        self.risk.MAX_OPEN_POSITIONS = self.regime.params.max_positions
 
-            # Apply live filters
-            if direction == "flat":
-                continue
-            if confidence < rules.MIN_AI_CONFIDENCE:
-                logger.info(f"Live SKIP {symbol}: confidence {confidence:.0%} < {rules.MIN_AI_CONFIDENCE:.0%}")
-                continue
-            if rules.REQUIRE_CONSENSUS and not consensus:
-                logger.info(f"Live SKIP {symbol}: no model consensus")
-                continue
+        # Publish bundle → triggers AIAnalyst → RiskAgent → ExecutionAgent pipeline
+        await self.bus.publish(bundle)
 
-            # Fibonacci check
-            if rules.REQUIRE_FIB_CONFLUENCE:
-                closes = ind.get("closes", [])
-                fib = multi_timeframe_fib(symbol, {"1h": closes}, price)
-                if fib.confluence_count < 1 and fib.fib_score_adj < 3:
-                    logger.info(f"Live SKIP {symbol}: no Fib confluence (score_adj={fib.fib_score_adj})")
-                    continue
+        self._market_states.pop(symbol, None)
+        self._technical_states.pop(symbol, None)
 
-            # Calculate position
-            size_usd = self.balance * rules.MAX_POSITION_PCT
-            if size_usd < rules.MIN_ORDER_USD:
-                logger.info(f"Live SKIP: position size ${size_usd:.2f} below minimum ${rules.MIN_ORDER_USD}")
-                continue
+    async def _on_risk_decision(self, event: RiskAssessmentEvent):
+        """Log risk decisions to live journal."""
+        if event.decision == RiskDecision.APPROVED:
+            self.live_repo.log("risk_approved",
+                f"Approved {event.proposal_id}: ${event.approved_size_usd:,.0f} "
+                f"({event.approved_size_pct_portfolio:.1%})")
+            self.trades_today += 1
+        else:
+            self.live_repo.log("risk_vetoed",
+                f"Vetoed {event.proposal_id}: {event.veto_reason}")
 
-            qty = size_usd / price
-            stop = price * (1 - rules.STOP_LOSS_PCT)
-            tp1 = price * (1 + rules.TP1_PCT)
-            tp2 = price * (1 + rules.TP2_PCT)
-
-            # Build trade rationale for logging
-            trade_rationale = (
-                f"{direction.upper()} {symbol} @ ${price:,.2f} | "
-                f"Score={tech_score:.0f} Conf={confidence:.0%} {'CONSENSUS' if consensus else 'single'} | "
-                f"F&G={fg_val} Regime=accumulate | "
-                f"Stop=${stop:.2f} ({rules.STOP_LOSS_PCT*100}%) TP1=${tp1:.2f} (+{rules.TP1_PCT*100}%) TP2=${tp2:.2f} (+{rules.TP2_PCT*100}%) | "
-                f"Size=${size_usd:.2f} ({rules.MAX_POSITION_PCT*100}%) | "
-                f"Reason: {rationale[:80]}"
-            )
-
-            logger.info(f"LIVE {'(DRY RUN) ' if self.dry_run else ''}TRADE: {trade_rationale}")
-
-            # Execute
-            if not self.dry_run:
-                order = await self._place_order(symbol, qty, "buy" if direction == "long" else "sell")
-                if order:
-                    trade_id = self.repo.open_trade(
-                        symbol=symbol, side="buy" if direction == "long" else "sell",
-                        entry_price=price, quantity=qty, size_usd=size_usd,
-                        stop_price=stop, tp1_price=tp1, tp2_price=tp2,
-                        signal_score=tech_score, ai_confidence=confidence,
-                        consensus=1 if consensus else 0,
-                    )
-                    self.trades_today += 1
-                    logger.info(f"LIVE ORDER FILLED: {symbol} qty={qty:.6f} @ ${price:,.2f} (trade_id={trade_id})")
-            else:
-                self.repo.open_trade(
-                    trade_id=f"dry_{datetime.now().strftime('%H%M%S')}_{symbol}",
-                    symbol=symbol, side="buy" if direction == "long" else "sell",
-                    entry_price=price, quantity=qty, size_usd=size_usd,
-                    stop_price=stop, tp1_price=tp1, tp2_price=tp2,
-                    signal_score=tech_score, ai_confidence=confidence,
-                    consensus=1 if consensus else 0,
-                )
-                self.trades_today += 1
-                logger.info(f"DRY RUN: would buy {symbol} qty={qty:.6f} @ ${price:,.2f}")
-
-    async def _check_exits(self, pos: dict):
-        """Check exit conditions for an open position."""
-        symbol = pos["symbol"]
-        current = pos.get("current_price", 0)
-        entry = pos.get("avg_entry", 0) or pos.get("avg_entry_price", 0)
-        if not current or not entry:
-            return
-
-        pnl_pct = (current - entry) / entry
-
-        # Find matching live trade
-        open_trades = self.repo.get_open_trades()
-        trade = None
-        for t in open_trades:
-            if t["symbol"] == symbol or t["symbol"] == symbol.replace("USD", "-USD"):
-                trade = t
-                break
-
-        if not trade:
-            return
-
-        # Stop loss
-        stop = trade.get("stop_price", entry * (1 - rules.STOP_LOSS_PCT))
-        if current <= stop:
-            logger.warning(f"LIVE EXIT {symbol}: STOP HIT at ${current:.4f} (stop=${stop:.4f})")
-            if not self.dry_run:
-                await self._close_position(symbol)
-            self.repo.close_trade(trade["trade_id"], current, "stop_loss")
-            return
-
-        # TP1: close 50%
-        tp1 = trade.get("tp1_price", entry * (1 + rules.TP1_PCT))
-        if current >= tp1 and "tp1" not in (trade.get("exit_reason") or ""):
-            logger.info(f"LIVE TP1 {symbol}: +{pnl_pct:.1%} — closing 50%")
-            if not self.dry_run:
-                sell_qty = float(pos.get("qty", 0)) * rules.TP1_SCALE
-                await self._place_order(symbol, sell_qty, "sell")
-            self.repo.log("tp1_hit", f"{symbol} +{pnl_pct:.1%}", trade["trade_id"])
-
-        # TP2: close remaining
-        tp2 = trade.get("tp2_price", entry * (1 + rules.TP2_PCT))
-        if current >= tp2:
-            logger.info(f"LIVE TP2 {symbol}: +{pnl_pct:.1%} — closing all")
-            if not self.dry_run:
-                await self._close_position(symbol)
-            self.repo.close_trade(trade["trade_id"], current, "tp2")
-
-    def _quick_tech_score(self, ind: dict, price: float) -> float:
-        """Quick technical score from cached indicators."""
-        rsi = None
-        try:
-            vals = ind.get("rsi_14", {})
-            if hasattr(vals, 'output_values') and vals.output_values:
-                rsi = float(vals.output_values[-1]) if vals.output_values[-1] is not None else None
-        except Exception:
-            pass
-
-        score = 50
-        if rsi:
-            if rsi < 30: score += 15
-            elif rsi < 40: score += 8
-            elif rsi > 70: score -= 15
-            elif rsi > 60: score -= 5
-
-        # EMA trend
-        try:
-            ema9 = float(ind["ema_9"].output_values[-1]) if ind.get("ema_9") and ind["ema_9"].output_values[-1] else None
-            ema21 = float(ind["ema_21"].output_values[-1]) if ind.get("ema_21") and ind["ema_21"].output_values[-1] else None
-            if ema9 and ema21:
-                if ema9 > ema21: score += 8
-                else: score -= 5
-        except Exception:
-            pass
-
-        return score
-
-    async def _get_ai_consensus(self, symbol: str, price: float, score: float, fear_greed: int) -> dict | None:
-        """Get dual-model AI consensus."""
-        prompt = f"{symbol} ${price:,.0f} RSI=? F&G={fear_greed} Score={score:.0f}/100\n\nJSON only: {{\"direction\":\"long/short/flat\",\"score\":0-100,\"ai_confidence\":0.0-1.0,\"rationale\":\"one sentence\"}}"
-
-        # Use Llama 3.2 3B for speed (3s, reliable JSON), then Qwen3 as second opinion
-        models = ["llama3.2:3b", "qwen3:14b"]
-        results = []
-        for model in models:
-            timeout_s = 15 if "llama" in model else 60
-            try:
-                async with httpx.AsyncClient(timeout=timeout_s) as client:
-                    r = await client.post(f"{settings.ollama_host}/api/generate",
-                        json={"model": model, "prompt": prompt, "stream": False,
-                              "options": {"temperature": 0.1, "num_predict": 2000 if "qwen" in model else 300}})
-                    if r.status_code == 200:
-                        resp = r.json().get("response", "")
-                        if not resp or len(resp.strip()) < 5:
-                            logger.debug(f"Live AI: {model} returned empty")
-                            continue
-                        import re, json as _json
-                        matches = re.findall(r'\{[^{}]*\}', resp)
-                        for m in matches:
-                            try:
-                                parsed = _json.loads(m)
-                                if "direction" in parsed:
-                                    results.append(parsed)
-                                    logger.info(f"Live AI [{model}]: {parsed.get('direction')} conf={parsed.get('ai_confidence')} — {parsed.get('rationale','')[:60]}")
-                                    break
-                            except Exception:
-                                pass
-            except Exception as e:
-                logger.debug(f"Live AI {model} failed: {e}")
-
-        if not results:
-            return None
-
-        primary = results[0]
-        consensus = False
-        if len(results) >= 2:
-            consensus = results[0].get("direction") == results[1].get("direction") and results[0].get("direction") != "flat"
-
-        return {
-            "direction": primary.get("direction", "flat"),
-            "confidence": primary.get("ai_confidence", 0.5),
-            "consensus": consensus,
-            "rationale": primary.get("rationale", ""),
-        }
-
-    async def _place_order(self, symbol: str, qty: float, side: str) -> dict | None:
-        alpaca_sym = symbol.replace("-", "/")
-        headers = {
-            "APCA-API-KEY-ID": settings.alpaca_api_key,
-            "APCA-API-SECRET-KEY": settings.alpaca_secret_key or settings.alpaca_api_secret,
-            "Content-Type": "application/json",
-        }
-        async with httpx.AsyncClient(timeout=15) as client:
-            try:
-                r = await client.post(f"{settings.alpaca_base_url}/v2/orders", headers=headers,
-                    json={"symbol": alpaca_sym, "qty": str(round(qty, 6)), "side": side,
-                          "type": "market", "time_in_force": "gtc"})
-                if r.status_code in (200, 201):
-                    return r.json()
-                logger.error(f"Live order failed: {r.status_code} {r.text[:100]}")
-            except Exception as e:
-                logger.error(f"Live order error: {e}")
-        return None
+    # ── Whale trigger with direction check ──
 
     async def _on_whale_signal(self, signal: dict):
-        """Whale activity detected — run immediate scan."""
-        logger.warning(f"LIVE WHALE TRIGGER: {signal.get('direction','?').upper()} — {signal.get('reason','')}")
-        self.repo.log("whale_trigger", signal.get("reason", ""), data=signal)
-        await self._scan_cycle()
+        """Direction-aware whale handler.
 
-    async def _close_position(self, symbol: str):
-        alpaca_sym = symbol.replace("-USD", "").replace("-", "") + "USD"
-        headers = {"APCA-API-KEY-ID": settings.alpaca_api_key,
-                    "APCA-API-SECRET-KEY": settings.alpaca_secret_key or settings.alpaca_api_secret}
-        async with httpx.AsyncClient(timeout=10) as client:
+        Bearish whale → set 12hr buy block, do NOT scan.
+        Bullish whale → boost confidence 20%, then scan.
+        """
+        direction = signal.get("direction", "neutral")
+        strength = signal.get("strength", 0)
+        reason = signal.get("reason", "")
+
+        if direction == "bearish":
+            self._bearish_block_until = time.time() + WHALE_BEARISH_BLOCK_SECONDS
+            hours = WHALE_BEARISH_BLOCK_SECONDS / 3600
+            logger.warning(
+                f"LIVE WHALE BEARISH (str={strength}/5): {reason} — "
+                f"BLOCKING new buys for {hours:.0f}h"
+            )
+            self.live_repo.log("whale_bearish_block",
+                f"Bearish whale detected, blocking buys for {hours:.0f}h: {reason}",
+                data=signal)
+            # Do NOT trigger scan on bearish whale
+            return
+
+        elif direction == "bullish":
+            logger.warning(
+                f"LIVE WHALE BULLISH (str={strength}/5): {reason} — "
+                f"boosting confidence +20%, triggering scan"
+            )
+            self.live_repo.log("whale_bullish_boost",
+                f"Bullish whale detected, +20% confidence boost: {reason}",
+                data=signal)
+            # Trigger immediate scan via market data agent
             try:
-                await client.delete(f"{settings.alpaca_base_url}/v2/positions/{alpaca_sym}", headers=headers)
+                await self.market_data._scan_all()
             except Exception as e:
-                logger.error(f"Close position failed: {e}")
+                logger.error(f"Whale-triggered scan failed: {e}")
+        else:
+            logger.info(f"LIVE WHALE NEUTRAL (str={strength}/5): {reason} — no action")
+            self.live_repo.log("whale_neutral", reason, data=signal)
+
+    # ── Main loop ──
+
+    async def run(self):
+        logger.info("Live Engine starting — same pipeline as main.py")
+        self.live_repo.log("engine", "Live engine started" + (" (DRY RUN)" if self.dry_run else ""))
+
+        # Override market_data to only scan live watchlist
+        settings_copy = settings.model_dump()
+        settings_copy["watchlist"] = LIVE_WATCHLIST
+
+        # Warm up technical indicators
+        logger.info("Warming up technical indicators for live watchlist...")
+        await self.technical.warmup(LIVE_WATCHLIST)
+        logger.info("Technical warmup complete")
+
+        # Start event bus
+        bus_task = asyncio.create_task(self.bus.run())
+
+        # Start agent loops — same as main.py but with live watchlist
+        agent_tasks = [
+            asyncio.create_task(self.market_data.run_forever(
+                interval_seconds=settings.scan_interval_seconds
+            )),
+            asyncio.create_task(self.sentiment.run_forever(interval_seconds=900)),
+            asyncio.create_task(self.onchain.run_forever(interval_seconds=3600)),
+            asyncio.create_task(self.monitor.run_monitor_loop(
+                interval_seconds=settings.monitor_interval_seconds
+            )),
+            asyncio.create_task(self.whale_trigger.run_forever()),
+        ]
+
+        logger.info(f"Live Engine running — {len(agent_tasks)} agent loops + event bus")
+        logger.info(f"RiskAgent thresholds: score>={self.risk.MIN_SIGNAL_SCORE}, "
+                     f"confidence>={self.risk.MIN_AI_CONFIDENCE}, "
+                     f"max_positions={self.risk.MAX_OPEN_POSITIONS}")
+
+        try:
+            await asyncio.gather(bus_task, *agent_tasks)
+        except asyncio.CancelledError:
+            logger.info("Live Engine shutting down...")
+            self.bus.stop()
 
 
 def main():

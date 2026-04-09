@@ -17,8 +17,8 @@ from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
 
 from config.settings import settings
-from config import live_rules as rules
 from db.live_repository import LiveRepository
+from agents.risk_agent import RiskAgent
 
 app = FastAPI(title="Signal Forge v2 — Live Trading")
 repo = LiveRepository()
@@ -40,24 +40,23 @@ async def status():
             pass
 
     pnl = repo.get_total_pnl()
-    halted, reason = repo.check_daily_halt(rules.DAILY_LOSS_LIMIT_USD)
+    halted, reason = repo.check_daily_halt(15.00)  # 5% of $300
 
     return {
         "mode": "LIVE" if not halted else "HALTED",
-        "starting_capital": rules.STARTING_CAPITAL,
+        "starting_capital": 300.00,
         "alpaca": alpaca,
         "pnl": pnl,
         "halted": halted,
         "halt_reason": reason,
         "rules": {
-            "coins": rules.WATCHLIST,
-            "max_positions": rules.MAX_OPEN_POSITIONS,
-            "position_size_pct": rules.MAX_POSITION_PCT * 100,
-            "stop_loss_pct": rules.STOP_LOSS_PCT * 100,
-            "tp1_pct": rules.TP1_PCT * 100,
-            "tp2_pct": rules.TP2_PCT * 100,
-            "daily_loss_limit": rules.DAILY_LOSS_LIMIT_USD,
-            "require_consensus": rules.REQUIRE_CONSENSUS,
+            "coins": ["BTC-USD", "ETH-USD", "SOL-USD"],
+            "min_signal_score": RiskAgent.MIN_SIGNAL_SCORE,
+            "min_ai_confidence": RiskAgent.MIN_AI_CONFIDENCE,
+            "max_positions": RiskAgent.MAX_OPEN_POSITIONS,
+            "position_size_pct": RiskAgent.MAX_POSITION_PCT * 100,
+            "daily_loss_limit": 15.00,
+            "pipeline": "EventBus → AIAnalyst → RiskAgent → ExecutionAgent → MonitorAgent",
         },
         "timestamp": datetime.now().isoformat(),
     }
@@ -200,6 +199,6 @@ setInterval(refresh, 15000);
 
 if __name__ == "__main__":
     print("Signal Forge v2 — LIVE Dashboard: http://localhost:8889")
-    print(f"Starting capital: ${rules.STARTING_CAPITAL}")
-    print(f"Coins: {rules.WATCHLIST}")
+    print(f"Starting capital: $300")
+    print(f"Coins: BTC-USD, ETH-USD, SOL-USD")
     uvicorn.run(app, host="0.0.0.0", port=8889, log_level="warning")
