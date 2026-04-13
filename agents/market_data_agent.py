@@ -12,12 +12,22 @@ The AI Analyst sees ALL of this in its prompt.
 """
 
 import asyncio
-from datetime import datetime
+import json
+import os
+from datetime import datetime, timedelta, timezone
 from loguru import logger
 
 from agents.event_bus import EventBus
 from agents.events import MarketStateEvent, MarketRegime
 from data import coinbase_client, altfins_client, fear_greed_client
+
+# altFINS MCP — direct bullish-signal trigger (mirrors altfins_shadow.py)
+ALTFINS_MCP_URL = "https://mcp.altfins.com/mcp"
+ALTFINS_SIGNAL_TOOL = "signal_feed_data"
+# Poll every 120s (~30 calls/hour) — well under the project's <100/hour budget
+ALTFINS_TRIGGER_POLL_SECONDS = 120
+# Re-trigger cooldown so a single signal doesn't fire repeated scans
+ALTFINS_TRIGGER_COOLDOWN_SECONDS = 300
 
 
 class MarketDataAgent:
@@ -31,8 +41,15 @@ class MarketDataAgent:
         self._cmc_volume_spikes: list = []
         self._arkham_whales: list = []
         self._market_momentum: float = 0  # -1 to +1
+        # altFINS direct trigger state
+        self._altfins_seen_signals: set[str] = set()
+        self._altfins_last_trigger_ts: float = 0.0
+        self._altfins_trigger_task: asyncio.Task | None = None
 
     async def run_forever(self, interval_seconds: int = 900):
+        # Launch the altFINS direct-trigger loop alongside the periodic scan
+        if self.altfins_key and self._altfins_trigger_task is None:
+            self._altfins_trigger_task = asyncio.create_task(self._altfins_trigger_loop())
         while True:
             try:
                 await self._scan_all()
@@ -82,6 +99,128 @@ class MarketDataAgent:
             f"F&G={self._fear_greed} | Momentum={momentum_label} ({self._market_momentum:+.2f}) | "
             f"Vol spikes={len(self._cmc_volume_spikes)} | Whales={len(self._arkham_whales)}"
         )
+
+    # ── altFINS direct bullish-signal trigger ──
+
+    async def _altfins_trigger_loop(self):
+        """Poll altFINS signal_feed_data via MCP. On a NEW BULLISH signal for any
+        watchlist symbol, immediately call _scan_all() instead of waiting for the
+        next periodic scan. Mirrors the MCP usage in altfins_shadow.py.
+        """
+        try:
+            from mcp.client.streamable_http import streamablehttp_client
+            from mcp import ClientSession
+        except Exception as e:
+            logger.warning(f"MarketDataAgent: altFINS MCP not available ({e}) — trigger loop disabled")
+            return
+
+        watchlist_bases = {self._base_symbol(s) for s in self.watchlist}
+        headers = {"X-Api-Key": self.altfins_key}
+        logger.info(
+            f"MarketDataAgent: altFINS trigger loop started "
+            f"(poll={ALTFINS_TRIGGER_POLL_SECONDS}s, cooldown={ALTFINS_TRIGGER_COOLDOWN_SECONDS}s, "
+            f"symbols={len(watchlist_bases)})"
+        )
+
+        while True:
+            try:
+                async with streamablehttp_client(ALTFINS_MCP_URL, headers=headers) as (
+                    read, write, _
+                ):
+                    async with ClientSession(read, write) as session:
+                        await session.initialize()
+                        new_bullish = await self._fetch_altfins_bullish(session, watchlist_bases)
+                        if new_bullish:
+                            await self._handle_altfins_bullish(new_bullish)
+            except Exception as e:
+                logger.debug(f"altFINS trigger poll failed: {e}")
+            await asyncio.sleep(ALTFINS_TRIGGER_POLL_SECONDS)
+
+    async def _fetch_altfins_bullish(self, session, watchlist_bases: set[str]) -> list[dict]:
+        """Pull last 30min of BULLISH signals; return list NOT yet seen."""
+        now = datetime.now(timezone.utc)
+        from_str = (now - timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        to_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        result = await session.call_tool(
+            ALTFINS_SIGNAL_TOOL,
+            arguments={
+                "coins": sorted(watchlist_bases),
+                "direction": "BULLISH",
+                "fromDate": from_str,
+                "toDate": to_str,
+                "size": 50,
+            },
+        )
+
+        items: list[dict] = []
+        for item in getattr(result, "content", []) or []:
+            text = getattr(item, "text", None)
+            if not text:
+                continue
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(data, list):
+                items.extend(data)
+            elif isinstance(data, dict):
+                if isinstance(data.get("content"), list):
+                    items.extend(data["content"])
+                elif "symbol" in data or "signalKey" in data:
+                    items.append(data)
+
+        new_signals: list[dict] = []
+        for sig in items:
+            sym = (sig.get("symbol") or "").upper()
+            if sym not in watchlist_bases:
+                continue
+            sig_id = self._altfins_signal_id(sig)
+            if sig_id in self._altfins_seen_signals:
+                continue
+            self._altfins_seen_signals.add(sig_id)
+            new_signals.append(sig)
+
+        # Cap memory of seen-set
+        if len(self._altfins_seen_signals) > 1000:
+            self._altfins_seen_signals = set(list(self._altfins_seen_signals)[-500:])
+        return new_signals
+
+    async def _handle_altfins_bullish(self, signals: list[dict]):
+        import time as _time
+        now = _time.time()
+        if now - self._altfins_last_trigger_ts < ALTFINS_TRIGGER_COOLDOWN_SECONDS:
+            logger.debug(
+                f"altFINS trigger cooldown active "
+                f"({int(ALTFINS_TRIGGER_COOLDOWN_SECONDS - (now - self._altfins_last_trigger_ts))}s left), "
+                f"skipping {len(signals)} new bullish signal(s)"
+            )
+            return
+        symbols = sorted({(s.get("symbol") or "").upper() for s in signals if s.get("symbol")})
+        names = sorted({(s.get("signalName") or s.get("name") or "?") for s in signals})
+        logger.warning(
+            f"altFINS BULLISH trigger ({len(signals)} new): symbols={symbols} signals={names} "
+            f"— firing immediate _scan_all()"
+        )
+        self._altfins_last_trigger_ts = now
+        try:
+            await self._scan_all()
+        except Exception as e:
+            logger.error(f"altFINS-triggered scan failed: {e}")
+
+    @staticmethod
+    def _base_symbol(symbol: str) -> str:
+        return symbol.replace("-USD", "").replace("/USD", "").upper()
+
+    @staticmethod
+    def _altfins_signal_id(sig: dict) -> str:
+        """Stable identity for a single altFINS signal so we don't retrigger."""
+        return "|".join([
+            str(sig.get("symbol", "")),
+            str(sig.get("signalKey") or sig.get("signal_key") or ""),
+            str(sig.get("signalName") or sig.get("name") or ""),
+            str(sig.get("timestamp") or sig.get("date") or ""),
+        ])
 
     async def _fetch_cmc_data(self):
         """Fetch CoinMarketCap global metrics and volume spikes."""

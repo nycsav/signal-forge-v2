@@ -92,6 +92,76 @@ def test_veto_low_confidence():
     os.unlink(db_path)
 
 
+def test_small_account_300_dollars_sizes_to_30():
+    """A $300 account must produce a $30 order — 10% of equity, sub-$1K path."""
+    db_path = "/tmp/test_risk_v2_small.db"
+    _setup_test_db(db_path)
+    bus = EventBus()
+    risk = RiskAgent(bus, db_path, 300)
+    risk._cached_position_count = 0
+    risk._cached_positions = []
+    risk._cache_time = 9999999999
+
+    results = []
+    bus.subscribe(RiskAssessmentEvent, lambda e: results.append(e))
+
+    asyncio.run(_run(bus, risk, make_proposal(raw_score=72, ai_confidence=0.75)))
+    assert len(results) == 1
+    assert results[0].decision == RiskDecision.APPROVED
+    # Sub-$1K path must size at exactly 10% of equity = $30
+    assert abs(results[0].approved_size_usd - 30.0) < 1e-6, (
+        f"expected $30.00, got ${results[0].approved_size_usd:.2f}"
+    )
+    assert abs(results[0].approved_size_pct_portfolio - RiskAgent.SMALL_ACCOUNT_POSITION_PCT) < 1e-6
+    # And must clear the exchange minimum
+    assert results[0].approved_size_usd >= RiskAgent.MIN_ORDER_USD
+    os.unlink(db_path)
+
+
+def test_small_account_50_dollars_floors_at_min_order():
+    """A $50 account where 10% = $5 must be raised to MIN_ORDER_USD ($10)."""
+    db_path = "/tmp/test_risk_v2_tiny.db"
+    _setup_test_db(db_path)
+    bus = EventBus()
+    risk = RiskAgent(bus, db_path, 50)
+    risk._cached_position_count = 0
+    risk._cached_positions = []
+    risk._cache_time = 9999999999
+
+    results = []
+    bus.subscribe(RiskAssessmentEvent, lambda e: results.append(e))
+
+    asyncio.run(_run(bus, risk, make_proposal(raw_score=72, ai_confidence=0.75)))
+    assert len(results) == 1
+    assert results[0].decision == RiskDecision.APPROVED
+    # 10% of $50 = $5, below $10 exchange minimum → must be raised to $10
+    assert abs(results[0].approved_size_usd - 10.0) < 1e-6, (
+        f"expected $10.00 (MIN_ORDER_USD floor), got ${results[0].approved_size_usd:.2f}"
+    )
+    os.unlink(db_path)
+
+
+def test_large_account_1k_uses_kelly_path():
+    """An account >= $1K must NOT trigger the sub-$1K path — Half-Kelly applies."""
+    db_path = "/tmp/test_risk_v2_large.db"
+    _setup_test_db(db_path)
+    bus = EventBus()
+    risk = RiskAgent(bus, db_path, 100000)
+    risk._cached_position_count = 0
+    risk._cached_positions = []
+    risk._cache_time = 9999999999
+
+    results = []
+    bus.subscribe(RiskAssessmentEvent, lambda e: results.append(e))
+
+    asyncio.run(_run(bus, risk, make_proposal(raw_score=72, ai_confidence=0.75)))
+    assert results[0].decision == RiskDecision.APPROVED
+    # Kelly path is capped at MAX_POSITION_PCT (1%) — must NOT be 10%
+    assert results[0].approved_size_pct_portfolio <= RiskAgent.MAX_POSITION_PCT + 1e-9
+    assert results[0].approved_size_pct_portfolio < RiskAgent.SMALL_ACCOUNT_POSITION_PCT
+    os.unlink(db_path)
+
+
 async def _run(bus, risk, proposal):
     bus_task = asyncio.create_task(bus.run())
     await risk._on_proposal(proposal)

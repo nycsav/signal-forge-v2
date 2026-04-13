@@ -40,7 +40,7 @@ ALTFINS_MCP_URL = "https://mcp.altfins.com/mcp"
 WATCHLIST = ["BTC", "ETH", "SOL", "BNB", "XRP", "AVAX", "LINK", "DOT"]
 
 # Poll every 60 minutes — keeps us well within rate limits
-POLL_INTERVAL_SECONDS = 3600
+POLL_INTERVAL_SECONDS = 600
 
 # DB path — uses live_trades.db which already exists in your project
 DB_PATH = os.path.join(os.path.dirname(__file__), "live_trades.db")
