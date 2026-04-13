@@ -189,8 +189,13 @@ class SignalScorer:
         sentiment_score: float,
         onchain_score: float,
         ai_score: float = 50.0,
+        altfins_bonus: float = 0.0,
     ) -> tuple[float, dict]:
         """Combine all component scores into final 0-100 composite.
+
+        ``altfins_bonus`` is an additive bonus (0-35) from the altFINS
+        enrichment layer (chart patterns + oversold-in-uptrend filter).
+        Applied after the weighted sum, before clamping.
 
         Returns (composite_score, breakdown_dict).
         """
@@ -201,6 +206,7 @@ class SignalScorer:
             onchain_score * cw["on_chain"]["weight"] +
             ai_score * cw["ai_analyst"]["weight"]
         )
+        composite += altfins_bonus
         composite = max(0, min(100, composite))
 
         breakdown = {
@@ -208,6 +214,7 @@ class SignalScorer:
             "sentiment": round(sentiment_score, 1),
             "on_chain": round(onchain_score, 1),
             "ai_analyst": round(ai_score, 1),
+            "altfins_bonus": round(altfins_bonus, 1),
             "composite": round(composite, 1),
         }
 

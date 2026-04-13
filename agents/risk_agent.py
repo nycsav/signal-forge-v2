@@ -46,12 +46,22 @@ class RiskAgent:
     WEEKLY_LOSS_LIMIT = 0.10         # 10%
     MIN_SIGNAL_SCORE = 62
     MIN_AI_CONFIDENCE = 0.62
+    # Sub-$1K account sizing path:
+    #   Accounts < $1,000 bypass Half-Kelly and use a flat 10% of equity,
+    #   capped at 10% and floored at MIN_ORDER_USD so the order clears the
+    #   exchange minimum even on very small accounts.
+    SMALL_ACCOUNT_THRESHOLD = 1000.0   # equity below this triggers the small-account path
+    MIN_ORDER_USD = 10.0               # Coinbase minimum order size (USD)
+    SMALL_ACCOUNT_POSITION_PCT = 0.10  # 10% of equity for sub-$1K accounts
     # Absolute floors — RegimeEngine can lower instance MIN_SIGNAL_SCORE/MIN_AI_CONFIDENCE
     # for sizing logic, but the threshold checks below ALWAYS enforce these floors.
     MIN_SIGNAL_SCORE_FLOOR = 62
     MIN_AI_CONFIDENCE_FLOOR = 0.62
     MAX_SAME_GROUP = 3               # Max per sector (spec: 3)
     MIN_RISK_REWARD = 2.0
+
+    # altFINS TA confirmation — disagreement halves position size
+    ALTFINS_DISAGREE_SIZE_MULT = 0.50
 
     def __init__(self, event_bus: EventBus, db_path: str, portfolio_value: float):
         self.bus = event_bus
@@ -61,12 +71,14 @@ class RiskAgent:
         self._alpaca_secret = settings.alpaca_secret_key or settings.alpaca_api_secret
         self._alpaca_base = settings.alpaca_base_url
         self._cached_position_count: int = 0
+        # Set by orchestrator after init — ref to altFINS enrichment agent
+        self.altfins = None  # Optional[AltFINSEnrichment]
         self._cached_positions: list = []
         self._cache_time: float = 0
         self.bus.subscribe(TradeProposal, self._on_proposal)
 
     async def _on_proposal(self, proposal: TradeProposal):
-        """Run all 7 risk checks. Any failure = VETO."""
+        """Run all risk checks + altFINS pre-execution gates. Any failure = VETO."""
         checks = [
             self._check_signal_threshold(proposal),
             self._check_ai_confidence(proposal),
@@ -83,8 +95,18 @@ class RiskAgent:
                 await self._veto(proposal, reason)
                 return
 
+        # ── altFINS pre-execution: news check (veto on negative) ──
+        news_veto = await self._check_altfins_news(proposal)
+        if news_veto:
+            await self._veto(proposal, news_veto)
+            return
+
         # All checks passed — approve with sizing
         size_pct = self._calculate_position_size(proposal)
+
+        # ── altFINS pre-execution: TA confirmation (halve size on disagree) ──
+        size_pct = await self._apply_altfins_ta_adjustment(proposal, size_pct)
+
         size_usd = self.portfolio_value * size_pct
 
         event = RiskAssessmentEvent(
@@ -263,7 +285,80 @@ class RiskAgent:
         ai_mod = 0.70 + (p.ai_confidence * 0.30)
 
         final = half_kelly * conviction * ai_mod
-        return min(self.MAX_POSITION_PCT, max(0.005, final))
+        final_pct = min(self.MAX_POSITION_PCT, max(0.005, final))
+
+        # Sub-$1K account path: bypass Half-Kelly and size at a flat 10% of
+        # equity. If 10% is below the exchange minimum (MIN_ORDER_USD), bump
+        # the percentage up just enough to clear it. Larger accounts (>=$1K)
+        # keep the original Half-Kelly behavior.
+        if self.portfolio_value < self.SMALL_ACCOUNT_THRESHOLD and self.portfolio_value > 0:
+            small_pct = self.SMALL_ACCOUNT_POSITION_PCT  # 10% by default
+            min_order_pct = self.MIN_ORDER_USD / self.portfolio_value
+            if small_pct < min_order_pct:
+                # Account so small that 10% won't meet the exchange minimum;
+                # raise the pct to exactly hit MIN_ORDER_USD.
+                small_pct = min_order_pct
+            sized_usd = self.portfolio_value * small_pct
+            logger.info(
+                f"Risk: sub-$1K sizing path fired for {p.symbol} "
+                f"portfolio=${self.portfolio_value:.2f} kelly_pct={final_pct:.4f} "
+                f"-> sized={small_pct:.4f} (${sized_usd:.2f})"
+            )
+            return small_pct
+
+        return final_pct
+
+    # ── altFINS Pre-Execution Checks ──
+
+    async def _check_altfins_news(self, proposal: TradeProposal) -> str:
+        """Check altFINS news for negative sentiment. Returns veto reason or ''."""
+        if not self.altfins:
+            return ""
+        try:
+            news = await self.altfins.check_news_sentiment(proposal.symbol, lookback_hours=4)
+            if news.get("negative"):
+                reason = (
+                    f"altFINS news negative ({news['negative_count']}/{news['total_articles']} articles) "
+                    f"— delaying entry: {'; '.join(news.get('headlines', [])[:2])}"
+                )
+                logger.warning(f"Risk: {proposal.symbol} {reason}")
+                return reason
+        except Exception as e:
+            logger.debug(f"altFINS news check failed for {proposal.symbol}: {e}")
+        return ""
+
+    async def _apply_altfins_ta_adjustment(self, proposal: TradeProposal, size_pct: float) -> float:
+        """Check altFINS TA direction. Halve size if they disagree with our direction."""
+        if not self.altfins:
+            return size_pct
+        try:
+            ta = await self.altfins.check_ta_confirmation(proposal.symbol)
+            altfins_dir = ta.get("direction", "neutral")
+            our_dir = proposal.direction.value  # "long" or "short"
+
+            # Map our direction to comparable string
+            agrees = (
+                (our_dir == "long" and altfins_dir == "bullish") or
+                (our_dir == "short" and altfins_dir == "bearish") or
+                altfins_dir == "neutral"  # neutral = no opinion, don't penalize
+            )
+
+            if not agrees:
+                adjusted = size_pct * self.ALTFINS_DISAGREE_SIZE_MULT
+                logger.warning(
+                    f"Risk: altFINS TA disagrees for {proposal.symbol} "
+                    f"(ours={our_dir}, altfins={altfins_dir}) — "
+                    f"reducing size {size_pct:.4f} → {adjusted:.4f} (50% cut)"
+                )
+                return adjusted
+            elif altfins_dir != "neutral":
+                logger.info(
+                    f"Risk: altFINS TA confirms {proposal.symbol} "
+                    f"(both={altfins_dir}) — size unchanged"
+                )
+        except Exception as e:
+            logger.debug(f"altFINS TA check failed for {proposal.symbol}: {e}")
+        return size_pct
 
     def _compute_risk_score(self, p: TradeProposal) -> float:
         """0 = safe, 1 = maximum risk."""

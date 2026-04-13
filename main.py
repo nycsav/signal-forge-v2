@@ -28,6 +28,7 @@ from agents.learning_agent import LearningAgent
 from agents.regime_engine import RegimeAdaptiveEngine
 from agents.whale_trigger import WhaleTrigger
 from agents.chart_pattern_agent import ChartPatternAgent
+from agents.altfins_enrichment import AltFINSEnrichment
 from agents.scoring import SignalScorer
 from db.repository import Repository
 from dashboard.app import app as dashboard_app
@@ -64,6 +65,10 @@ class SignalForgeOrchestrator:
         self.learning = LearningAgent(self.bus, settings.database_path)
         self.whale_trigger = WhaleTrigger(event_bus=self.bus, on_signal=self._on_whale_signal)
         self.chart_patterns = ChartPatternAgent(self.bus)
+        self.altfins = AltFINSEnrichment(
+            api_key=config.get("altfins_api_key", ""),
+            watchlist=config.get("watchlist", []),
+        )
         self.regime = RegimeAdaptiveEngine(settings.database_path)
 
         # Orchestrator state for bundle assembly
@@ -172,11 +177,14 @@ class SignalForgeOrchestrator:
         if bundle.sentiment_stale and bundle.onchain_stale:
             bundle.max_allowed_confidence = 0.65
 
-        # Log the signal
+        # Log the signal (with altFINS enrichment bonus)
         tech_score = self.scorer.score_technical(technical)
         sent_score = self.scorer.score_sentiment(bundle.sentiment) if bundle.sentiment else 50
         onchain_score = self.scorer.score_onchain(bundle.on_chain) if bundle.on_chain else 50
-        composite, breakdown = self.scorer.composite_score(tech_score, sent_score, onchain_score)
+        altfins_bonus = self.altfins.get_total_bonus(symbol)
+        composite, breakdown = self.scorer.composite_score(
+            tech_score, sent_score, onchain_score, altfins_bonus=altfins_bonus,
+        )
 
         # Use adaptive threshold instead of fixed
         adaptive_threshold = self.regime.params.score_threshold
@@ -217,6 +225,12 @@ class SignalForgeOrchestrator:
 
         # Start event bus
         bus_task = asyncio.create_task(self.bus.run())
+
+        # Start altFINS enrichment background polling (patterns 4h, screener 15m)
+        await self.altfins.start()
+
+        # Pass enrichment ref to RiskAgent for pre-execution checks
+        self.risk.altfins = self.altfins
 
         # Start agent loops
         agent_tasks = [

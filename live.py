@@ -39,6 +39,7 @@ from agents.monitor_agent import MonitorAgent
 from agents.scoring import SignalScorer
 from agents.regime_engine import RegimeAdaptiveEngine
 from agents.whale_trigger import WhaleTrigger
+from agents.altfins_enrichment import AltFINSEnrichment
 
 
 # Live watchlist — only the most liquid
@@ -49,7 +50,8 @@ STARTING_CAPITAL = 300.00
 DAILY_LOSS_LIMIT_USD = 15.00      # 5% of $300
 DAILY_LOSS_LIMIT_PCT = 0.05
 MAX_TRADES_PER_DAY = 5
-WHALE_BEARISH_BLOCK_SECONDS = 43200  # 12 hours
+WHALE_NET_FLOW_WINDOW_SECONDS = 43200  # 12 hours — rolling whale event window
+WHALE_BLOCK_MIN_STRENGTH = 3           # min bearish strength to qualify for block
 
 
 class LiveEngine:
@@ -78,14 +80,21 @@ class LiveEngine:
         self.monitor = MonitorAgent(self.bus, settings.database_path)
         self.regime = RegimeAdaptiveEngine(settings.database_path)
 
+        # altFINS enrichment (patterns 4h, screener 15m)
+        self.altfins = AltFINSEnrichment(
+            api_key=config.get("altfins_api_key", ""),
+            watchlist=config.get("watchlist", []),
+        )
+
         # Whale trigger with direction-aware callback
         self.whale_trigger = WhaleTrigger(event_bus=self.bus, on_signal=self._on_whale_signal)
 
         # Live-specific state
         self.halted = False
         self.trades_today = 0
-        self._bearish_block_until: float = 0  # timestamp when bearish block expires
-        self._last_bearish_usd: float = 0     # USD size of the whale that set the block
+        # Rolling 12h whale-event window for net-flow block model.
+        # Each entry: {"timestamp": float, "direction": str, "usd_value": float, "strength": int}
+        self._whale_events: list[dict] = []
         self._whale_confidence_boost: float = 0  # temporary confidence boost from bullish whale
 
         # Orchestrator state for bundle assembly (same as main.py)
@@ -162,11 +171,19 @@ class LiveEngine:
         if symbol not in LIVE_WATCHLIST:
             return
 
-        # Check bearish whale block
-        if time.time() < self._bearish_block_until:
-            remaining = (self._bearish_block_until - time.time()) / 3600
-            logger.info(f"Live BLOCKED by bearish whale signal ({remaining:.1f}h remaining) — skipping {symbol}")
-            self.live_repo.log("whale_block", f"Bearish block active, skipping {symbol}")
+        # Rolling 12h whale net-flow block check
+        self._prune_whale_events()
+        bullish_usd_12h, bearish_usd_12h, max_bearish_str = self._whale_window_totals()
+        if self._whale_block_active(bullish_usd_12h, bearish_usd_12h, max_bearish_str):
+            logger.info(
+                f"Live BLOCKED by whale net-flow (bear=${bearish_usd_12h/1e6:.1f}m > "
+                f"bull=${bullish_usd_12h/1e6:.1f}m, max_bear_str={max_bearish_str}) — skipping {symbol}"
+            )
+            self.live_repo.log(
+                "whale_block",
+                f"Net-flow block active, skipping {symbol}",
+                data={"bullish_usd_12h": bullish_usd_12h, "bearish_usd_12h": bearish_usd_12h},
+            )
             return
 
         now = datetime.now()
@@ -198,7 +215,10 @@ class LiveEngine:
         tech_score = self.scorer.score_technical(technical)
         sent_score = self.scorer.score_sentiment(bundle.sentiment) if bundle.sentiment else 50
         onchain_score = self.scorer.score_onchain(bundle.on_chain) if bundle.on_chain else 50
-        composite, breakdown = self.scorer.composite_score(tech_score, sent_score, onchain_score)
+        altfins_bonus = self.altfins.get_total_bonus(symbol)
+        composite, breakdown = self.scorer.composite_score(
+            tech_score, sent_score, onchain_score, altfins_bonus=altfins_bonus,
+        )
 
         adaptive_threshold = self.regime.params.score_threshold
 
@@ -236,65 +256,117 @@ class LiveEngine:
             self.live_repo.log("risk_vetoed",
                 f"Vetoed {event.proposal_id}: {event.veto_reason}")
 
-    # ── Whale trigger with direction check ──
+    # ── Whale trigger with rolling 12h net-flow model ──
+
+    def _prune_whale_events(self):
+        """Drop whale events older than the 12h window."""
+        cutoff = time.time() - WHALE_NET_FLOW_WINDOW_SECONDS
+        self._whale_events = [e for e in self._whale_events if e["timestamp"] >= cutoff]
+
+    def _whale_window_totals(self) -> tuple[float, float, int]:
+        """Return (bullish_usd_12h, bearish_usd_12h, strongest_bearish_strength)."""
+        bullish_usd = 0.0
+        bearish_usd = 0.0
+        max_bear_str = 0
+        for e in self._whale_events:
+            if e["direction"] == "bullish":
+                bullish_usd += e["usd_value"]
+            elif e["direction"] == "bearish":
+                bearish_usd += e["usd_value"]
+                if e["strength"] > max_bear_str:
+                    max_bear_str = e["strength"]
+        return bullish_usd, bearish_usd, max_bear_str
+
+    def _whale_block_active(self, bullish_usd: float, bearish_usd: float, max_bear_str: int) -> bool:
+        """Block when bearish flow dominates AND at least one strong bearish event."""
+        return bearish_usd > bullish_usd and max_bear_str >= WHALE_BLOCK_MIN_STRENGTH
 
     async def _on_whale_signal(self, signal: dict):
-        """Direction-aware whale handler.
+        """Rolling 12h net-flow whale handler.
 
-        Bearish whale → set 12hr buy block, do NOT scan.
-        Bullish whale → boost confidence 20%, then scan.
-        Bullish override: a larger, strength>=3 bullish event CLEARS an
-        existing bearish block (smart money reversing direction).
+        Each whale event is appended to a 12h window. The buy block is computed
+        from the net flow over that window — no fixed expiry timer. A block
+        clears automatically when bullish flow >= bearish flow.
         """
         direction = signal.get("direction", "neutral")
-        strength = signal.get("strength", 0)
+        strength = int(signal.get("strength", 0) or 0)
         reason = signal.get("reason", "")
         usd = float(signal.get("usd_value", 0) or 0)
 
-        if direction == "bearish":
-            self._bearish_block_until = time.time() + WHALE_BEARISH_BLOCK_SECONDS
-            self._last_bearish_usd = usd
-            hours = WHALE_BEARISH_BLOCK_SECONDS / 3600
-            logger.warning(
-                f"LIVE WHALE BEARISH (str={strength}/5, ${usd/1e6:.1f}m): {reason} — "
-                f"BLOCKING new buys for {hours:.0f}h"
-            )
-            self.live_repo.log("whale_bearish_block",
-                f"Bearish whale (${usd/1e6:.1f}m), blocking buys for {hours:.0f}h: {reason}",
-                data=signal)
-            # Do NOT trigger scan on bearish whale
+        if direction not in ("bullish", "bearish"):
+            logger.info(f"LIVE WHALE NEUTRAL (str={strength}/5): {reason} — no action")
             return
 
-        elif direction == "bullish":
-            # Override check: if a bearish block is active, a larger
-            # bullish event with strength>=3 clears it (smart money flip).
-            block_active = time.time() < self._bearish_block_until
-            if block_active and strength >= 3 and usd > self._last_bearish_usd:
-                logger.warning(
-                    f"Bullish whale (${usd/1e6:.1f}m) overrides bearish block "
-                    f"(prior ${self._last_bearish_usd/1e6:.1f}m) — clearing block"
-                )
-                self.live_repo.log("whale_bullish_override",
-                    f"Bullish whale ${usd/1e6:.1f}m overrides bearish block "
-                    f"(${self._last_bearish_usd/1e6:.1f}m): {reason}",
-                    data=signal)
-                self._bearish_block_until = 0
-                self._last_bearish_usd = 0
+        # Snapshot block state BEFORE appending the new event
+        self._prune_whale_events()
+        pre_bull, pre_bear, pre_max_bear = self._whale_window_totals()
+        was_blocked = self._whale_block_active(pre_bull, pre_bear, pre_max_bear)
 
+        # Append + reprune (new event may itself be too old? no — it's now)
+        self._whale_events.append({
+            "timestamp": time.time(),
+            "direction": direction,
+            "usd_value": usd,
+            "strength": strength,
+        })
+
+        post_bull, post_bear, post_max_bear = self._whale_window_totals()
+        is_blocked = self._whale_block_active(post_bull, post_bear, post_max_bear)
+
+        if direction == "bearish":
             logger.warning(
-                f"LIVE WHALE BULLISH (str={strength}/5, ${usd/1e6:.1f}m): {reason} — "
-                f"boosting confidence +20%, triggering scan"
+                f"LIVE WHALE BEARISH (str={strength}/5, ${usd/1e6:.1f}m): {reason} — "
+                f"window bull=${post_bull/1e6:.1f}m bear=${post_bear/1e6:.1f}m "
+                f"block={'ACTIVE' if is_blocked else 'inactive'}"
             )
-            self.live_repo.log("whale_bullish_boost",
-                f"Bullish whale (${usd/1e6:.1f}m), +20% confidence boost: {reason}",
-                data=signal)
-            # Trigger immediate scan via market data agent
-            try:
-                await self.market_data._scan_all()
-            except Exception as e:
-                logger.error(f"Whale-triggered scan failed: {e}")
-        else:
-            logger.info(f"LIVE WHALE NEUTRAL (str={strength}/5): {reason} — no action")
+            self.live_repo.log(
+                "whale_bearish_block",
+                f"Bearish whale (${usd/1e6:.1f}m): {reason}",
+                data={
+                    "signal": signal,
+                    "bullish_usd_12h": post_bull,
+                    "bearish_usd_12h": post_bear,
+                    "block_active": is_blocked,
+                },
+            )
+            return  # do not scan on bearish
+
+        # Bullish branch
+        logger.warning(
+            f"LIVE WHALE BULLISH (str={strength}/5, ${usd/1e6:.1f}m): {reason} — "
+            f"window bull=${post_bull/1e6:.1f}m bear=${post_bear/1e6:.1f}m, "
+            f"+20% confidence boost, triggering scan"
+        )
+        self.live_repo.log(
+            "whale_bullish_boost",
+            f"Bullish whale (${usd/1e6:.1f}m), +20% confidence boost: {reason}",
+            data={
+                "signal": signal,
+                "bullish_usd_12h": post_bull,
+                "bearish_usd_12h": post_bear,
+            },
+        )
+
+        # If this bullish event flipped the rolling block off, journal it
+        if was_blocked and not is_blocked:
+            logger.warning(
+                f"Whale net-flow block CLEARED — bull=${post_bull/1e6:.1f}m "
+                f">= bear=${post_bear/1e6:.1f}m"
+            )
+            self.live_repo.log(
+                "whale_net_flow_cleared",
+                f"Rolling 12h net-flow block cleared: bull=${post_bull/1e6:.1f}m "
+                f">= bear=${post_bear/1e6:.1f}m",
+                data={
+                    "bullish_usd_12h": post_bull,
+                    "bearish_usd_12h": post_bear,
+                },
+            )
+
+        try:
+            await self.market_data._scan_all()
+        except Exception as e:
+            logger.error(f"Whale-triggered scan failed: {e}")
             self.live_repo.log("whale_neutral", reason, data=signal)
 
     # ── Main loop ──
@@ -314,6 +386,10 @@ class LiveEngine:
 
         # Start event bus
         bus_task = asyncio.create_task(self.bus.run())
+
+        # Start altFINS enrichment + pass ref to risk agent
+        await self.altfins.start()
+        self.risk.altfins = self.altfins
 
         # Start agent loops — same as main.py but with live watchlist
         agent_tasks = [
