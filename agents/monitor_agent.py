@@ -33,6 +33,15 @@ class MonitorAgent:
     MAX_HOLD_HOURS = 72
     FLAT_HOURS = 48
     FLAT_THRESHOLD = 0.005  # ±0.5%
+    FIXED_TRAIL_FALLBACK_PCT = 0.05   # 5% fixed if ATR unavailable
+
+    # Hybrid ATR trailing: start at 3×ATR, tighten to 2×ATR after +1.5R profit
+    TRAIL_ATR_INITIAL = 3.0
+    TRAIL_ATR_TIGHT = 2.0
+    TRAIL_TIGHTEN_R = 1.5  # tighten after profit >= 1.5× initial risk
+
+    # Regime-calibrated alpha (multiplied by ATR for trailing distance)
+    REGIME_ALPHA = {"low_vol": 2.0, "normal": 2.5, "high_vol": 3.5}
 
     def __init__(self, event_bus: EventBus, db_path: str):
         self.bus = event_bus
@@ -93,7 +102,8 @@ class MonitorAgent:
 
             state = self._state[symbol]
 
-            # Update high water mark (highest CLOSE)
+            # (A) Trail from highest CLOSE not wick high — update HWM at scan
+            #     cycle only (current = closing price at scan time, not intraday)
             if current > state["hwm"]:
                 state["hwm"] = current
 
@@ -105,16 +115,18 @@ class MonitorAgent:
             state["closes"] = closes
 
             if len(closes) >= 15:
-                # True ATR(14): average of absolute price changes over 14 periods
                 true_ranges = [abs(closes[i] - closes[i-1]) for i in range(-14, 0)]
                 atr = sum(true_ranges) / len(true_ranges)
             else:
-                # Fallback: 1.2% of entry (realistic for current low-vol market)
-                atr = entry * 0.012
+                # (B) Fallback to 5% fixed if ATR unavailable (was 1.2%)
+                atr = entry * self.FIXED_TRAIL_FALLBACK_PCT
 
             risk = atr * self.ATR_STOP_MULT
             stop = entry - risk
+
+            # (B) Activation: don't trail until profit >= 1.5 × ATR(14)
             activation = entry + atr * self.ATR_ACTIVATION_MULT
+
             tp1 = entry + risk * self.TP1_R
             tp2 = entry + risk * self.TP2_R
             tp3 = entry + risk * self.TP3_R
@@ -122,22 +134,38 @@ class MonitorAgent:
             pnl_pct = (current - entry) / entry
             hold_hours = (datetime.now() - state["first_seen"]).total_seconds() / 3600
 
+            # (D) Regime-calibrated alpha — from regime engine state
+            regime_alpha = self._get_regime_alpha()
+
             # ── Layer 1: Hard Stop ──
             if current <= stop:
                 await self._close_position(pos, "hard_stop", current)
                 actions_taken += 1
                 continue
 
-            # ── Layer 2: ATR Trailing Stop ──
+            # ── Layer 2: Hybrid ATR Trailing Stop ──
             if current >= activation:
                 state["trailing_active"] = True
 
             if state["trailing_active"]:
-                trailing_stop = state["hwm"] - risk
-                # Trailing stop only moves up
-                if trailing_stop > stop:
-                    stop = trailing_stop
-                if current <= stop:
+                # (C) Hybrid: start at 3×ATR, tighten to 2×ATR after +1.5R profit
+                profit_r = (current - entry) / risk if risk > 0 else 0
+                if profit_r >= self.TRAIL_TIGHTEN_R:
+                    trail_mult = self.TRAIL_ATR_TIGHT  # tightened: 2×ATR
+                else:
+                    trail_mult = self.TRAIL_ATR_INITIAL  # initial: 3×ATR
+
+                # (D) Apply regime alpha overlay
+                trail_distance = atr * min(trail_mult, regime_alpha)
+
+                trailing_stop = state["hwm"] - trail_distance
+
+                # (E) No-widening: stop can only move UP, never down
+                old_stop = state.get("trailing_stop_price", stop)
+                new_stop = max(old_stop, trailing_stop)
+                state["trailing_stop_price"] = new_stop
+
+                if current <= new_stop:
                     await self._close_position(pos, "trailing_stop", current)
                     actions_taken += 1
                     continue
@@ -195,6 +223,31 @@ class MonitorAgent:
 
         if actions_taken > 0:
             logger.info(f"Monitor: {actions_taken} exit actions taken this cycle")
+
+    def _get_regime_alpha(self) -> float:
+        """(D) Return trailing-stop alpha based on current regime volatility.
+
+        Uses avg ATR % across tracked positions as a proxy for volatility regime:
+          avg_atr_pct > 6% → high_vol (alpha=3.5)
+          avg_atr_pct < 1.5% → low_vol (alpha=2.0)
+          else → normal (alpha=2.5)
+        """
+        atr_pcts = []
+        for sym, s in self._state.items():
+            closes = s.get("closes", [])
+            if len(closes) >= 15:
+                trs = [abs(closes[i] - closes[i-1]) for i in range(-14, 0)]
+                atr = sum(trs) / len(trs)
+                price = closes[-1] if closes[-1] > 0 else 1
+                atr_pcts.append(atr / price * 100)
+        if not atr_pcts:
+            return self.REGIME_ALPHA["normal"]
+        avg = sum(atr_pcts) / len(atr_pcts)
+        if avg > 6.0:
+            return self.REGIME_ALPHA["high_vol"]
+        elif avg < 1.5:
+            return self.REGIME_ALPHA["low_vol"]
+        return self.REGIME_ALPHA["normal"]
 
     async def _close_position(self, pos: dict, reason: str, price: float):
         symbol = pos["symbol"]

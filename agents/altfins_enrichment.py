@@ -31,6 +31,27 @@ PATTERN_BONUS_POINTS = 12             # score bonus for a qualifying pattern (10
 OVERSOLD_RSI_THRESHOLD = 30
 OVERSOLD_BONUS_POINTS = 20            # per spec
 
+# Crossover signal types → bonus points
+CROSSOVER_POLL_SECONDS = 15 * 60      # every 15 minutes
+CROSSOVER_SIGNALS = {
+    "SIGNALS_SUMMARY_SMA_50_200":       12,  # Golden/Death Cross
+    "SIGNALS_SUMMARY_EMA_12_50":         8,
+    "SIGNALS_SUMMARY_EMA_100_200":      10,
+    "SIGNALS_SUMMARY_MACD_SIGNAL":       6,
+    "SIGNALS_SUMMARY_RSI_14_CROSS_30":   8,  # RSI exits oversold
+}
+# Also match partial/lowercase key variants from altFINS response
+CROSSOVER_KEY_MAP = {
+    "sma_50_200":       12,
+    "golden_cross":     12,
+    "death_cross":      12,
+    "ema_12_50":         8,
+    "ema_100_200":      10,
+    "macd_signal":       6,
+    "rsi_14_cross_30":   8,
+    "rsi_cross_30":      8,
+}
+
 
 class AltFINSEnrichment:
     """Background poller + in-memory cache for altFINS enrichment data."""
@@ -41,10 +62,12 @@ class AltFINSEnrichment:
         # Caches keyed by symbol (uppercase, no suffix)
         self._pattern_cache: dict[str, list[dict]] = {}     # symbol → [pattern, ...]
         self._oversold_uptrend: set[str] = set()             # symbols matching oversold+uptrend
+        self._crossover_cache: dict[str, float] = {}         # symbol → total crossover bonus pts
         self._ta_cache: dict[str, dict] = {}                 # symbol → {data, fetched_at}
         self._news_cache: dict[str, dict] = {}               # symbol → {data, fetched_at}
         self._pattern_last_poll: float = 0
         self._screener_last_poll: float = 0
+        self._crossover_last_poll: float = 0
 
     # ── Background loops ─────────────────────────────────────────
 
@@ -52,7 +75,8 @@ class AltFINSEnrichment:
         """Launch background polling tasks. Call once from the orchestrator."""
         asyncio.create_task(self._poll_patterns_loop())
         asyncio.create_task(self._poll_screener_loop())
-        logger.info("AltFINS enrichment started (patterns=4h, screener=15m)")
+        asyncio.create_task(self._poll_crossover_loop())
+        logger.info("AltFINS enrichment started (patterns=4h, screener=15m, crossovers=15m)")
 
     async def _poll_patterns_loop(self):
         while True:
@@ -69,6 +93,14 @@ class AltFINSEnrichment:
             except Exception as e:
                 logger.debug(f"altFINS screener poll error: {e}")
             await asyncio.sleep(SCREENER_POLL_SECONDS)
+
+    async def _poll_crossover_loop(self):
+        while True:
+            try:
+                await self._fetch_crossover_signals()
+            except Exception as e:
+                logger.debug(f"altFINS crossover poll error: {e}")
+            await asyncio.sleep(CROSSOVER_POLL_SECONDS)
 
     # ── Data fetchers (MCP) ──────────────────────────────────────
 
@@ -176,6 +208,49 @@ class AltFINSEnrichment:
         self._oversold_uptrend = matches
         self._screener_last_poll = time.time()
 
+    async def _fetch_crossover_signals(self):
+        """Fetch signal_feed_data for BULLISH crossover signals (top 20 coins)."""
+        from datetime import datetime as _dt
+        now = _dt.now(timezone.utc)
+        from_str = (now - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        to_str = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+        top20 = self.watchlist[:20]
+
+        items = await self._mcp_call("signal_feed_data", {
+            "coins": top20,
+            "direction": "BULLISH",
+            "fromDate": from_str,
+            "toDate": to_str,
+            "size": 200,
+        })
+
+        new_cache: dict[str, float] = {}
+        matched = 0
+        for sig in items:
+            sym = (sig.get("symbol") or "").upper()
+            sig_key = (sig.get("signalKey") or sig.get("signal_key") or "").upper()
+            sig_name = (sig.get("signalName") or sig.get("name") or "").lower()
+
+            # Match against known crossover signal types
+            bonus = 0
+            if sig_key in CROSSOVER_SIGNALS:
+                bonus = CROSSOVER_SIGNALS[sig_key]
+            else:
+                # Try partial key matching
+                for partial, pts in CROSSOVER_KEY_MAP.items():
+                    if partial in sig_key.lower() or partial in sig_name:
+                        bonus = pts
+                        break
+
+            if bonus > 0 and sym:
+                new_cache[sym] = new_cache.get(sym, 0) + bonus
+                matched += 1
+
+        self._crossover_cache = new_cache
+        self._crossover_last_poll = time.time()
+        if matched:
+            logger.info(f"altFINS crossovers: {matched} signals matched for {len(new_cache)} symbols")
+
     # ── Scoring lookups (pure, no I/O) ───────────────────────────
 
     def get_pattern_bonus(self, symbol: str) -> float:
@@ -193,9 +268,19 @@ class AltFINSEnrichment:
             return float(OVERSOLD_BONUS_POINTS)
         return 0.0
 
+    def get_crossover_bonus(self, symbol: str) -> float:
+        """Return accumulated crossover signal bonus for this symbol."""
+        base = symbol.replace("-USD", "").replace("/USD", "").upper()
+        return self._crossover_cache.get(base, 0.0)
+
     def get_total_bonus(self, symbol: str) -> float:
         """Combined altFINS bonus for scoring. Max capped at 35."""
-        return min(35.0, self.get_pattern_bonus(symbol) + self.get_oversold_uptrend_bonus(symbol))
+        total = (
+            self.get_pattern_bonus(symbol) +
+            self.get_oversold_uptrend_bonus(symbol) +
+            self.get_crossover_bonus(symbol)
+        )
+        return min(35.0, total)
 
     # ── Pre-execution lookups (async, for risk_agent) ────────────
 

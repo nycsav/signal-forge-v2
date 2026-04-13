@@ -154,8 +154,31 @@ class RiskAgent:
 
     # ── Risk Checks ──
 
+    # (F) Raise signal threshold to 75 while Fear & Greed < 20
+    CAPITULATION_SCORE_OVERRIDE = 75
+    CAPITULATION_FG_THRESHOLD = 20
+
     def _check_signal_threshold(self, p: TradeProposal) -> tuple[bool, str]:
         threshold = max(self.MIN_SIGNAL_SCORE_FLOOR, self.MIN_SIGNAL_SCORE)
+        # (F) Override: tighter threshold during capitulation (F&G < 20).
+        #     Read F&G from the most recent signal_log entry.
+        try:
+            recent = self.repo.get_recent_events(1)
+            fg = 50
+            for e in recent:
+                payload = e.get("payload", {})
+                if isinstance(payload, str):
+                    import json
+                    try:
+                        payload = json.loads(payload)
+                    except Exception:
+                        payload = {}
+                fg = payload.get("fear_greed", 50)
+                break
+            if fg < self.CAPITULATION_FG_THRESHOLD:
+                threshold = max(threshold, self.CAPITULATION_SCORE_OVERRIDE)
+        except Exception:
+            pass  # don't break the check if F&G lookup fails
         if p.raw_score < threshold:
             return False, f"Score {p.raw_score:.0f} < minimum {threshold} (floor={self.MIN_SIGNAL_SCORE_FLOOR})"
         return True, ""
