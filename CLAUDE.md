@@ -1,4 +1,4 @@
-# Signal Forge v2 — System Reference
+# SignalForge v2 — altFINS Edition — System Reference
 
 This file is auto-loaded into every Claude Code session in this repo. Read it first.
 
@@ -47,8 +47,17 @@ Both `main.py` (paper, $100K) and `live.py` (live, $300) run the **identical** a
 
   Side channels (publish to same EventBus at HIGH priority):
     WhaleTrigger     — Arkham polls (60s global, 15min per-asset)
-                       bullish → boost+scan, bearish → 12hr buy block
+                       bullish → boost+scan, bearish → rolling 12h net-flow block
     ChartPatternAgent — every 4h, IHS / H&S / Double Bottom (scipy)
+
+  altFINS Enrichment Layer (agents/altfins_enrichment.py):
+    Background polling (no EventBus, direct cache):
+      pattern_getCryptoPatternData      — every 4h, +12 pts for ≥67% success BUY patterns
+      screener_getAltfinsScreenerData   — every 15m, +20 pts for Oversold-in-Uptrend
+      signal_feed_data (crossovers)     — every 15m, +6 to +12 pts per crossover signal
+    Pre-execution (called by RiskAgent per-trade):
+      technicalAnalysis_getTechnicalAnalysisData — TA confirmation, halve size on disagree
+      news_getCryptoNewsMessages                — veto on negative news (>40% in last 4h)
 ```
 
 **Tier mapping**
@@ -112,6 +121,11 @@ ExecutionAgent only subscribes to `RiskAssessmentEvent` with `decision == APPROV
 | `4715c03` | 2026-04-07 | Speed overhaul: 5-min scan, every trade outcome logged with full signal context + auto-generated lessons |
 | `35ff4bf` | 2026-04-07 | MarketDataAgent pulls all sources (Coinbase + CMC + Arkham + altFINS + F&G); AI prompt now sees `MarketChange` and `Regime` |
 
+| `e14d0df` | 2026-04-13 | **User guide** — `docs/USER_GUIDE.md` for both v2 and lite |
+| `65e370a` | 2026-04-13 | **Crossover signal scoring + trailing stop improvements** — 5 crossover types (SMA_50_200 +12, EMA_12_50 +8, EMA_100_200 +10, MACD_SIGNAL +6, RSI_14_CROSS_30 +8), trailing stop changes A-F, capitulation threshold override 62→75 |
+| `7f19e78` | 2026-04-13 | **Accumulated fixes** — sizing tests, whale rolling 12h net-flow, altFINS direct trigger in market_data_agent, backtest scripts (historical + comparison) |
+| `e0ed08a` | 2026-04-13 | **altFINS enrichment layer** — patterns (4h), oversold-in-uptrend (15m), TA confirmation (per-trade), news gate (per-trade), composite score altfins_bonus, sub-$1K sizing fix |
+
 For the full list, see `CHANGELOG.md`.
 
 ---
@@ -123,15 +137,24 @@ For the full list, see `CHANGELOG.md`.
 |---|---|---|
 | `MIN_SIGNAL_SCORE_FLOOR` | **62** | Absolute floor. Cannot be overridden. |
 | `MIN_AI_CONFIDENCE_FLOOR` | **0.62** | Absolute floor. Cannot be overridden. |
+| `CAPITULATION_SCORE_OVERRIDE` | **75** | Raised threshold when F&G < 20. Added 2026-04-13. |
 | `MIN_SIGNAL_SCORE` | 62 | Class default; instance value gets overwritten by regime |
 | `MIN_AI_CONFIDENCE` | 0.62 | Class default; instance value gets overwritten by regime |
 | `MAX_OPEN_POSITIONS` | 5 | Hard cap on concurrent positions |
 | `MAX_POSITION_PCT` | 0.01 | 1% per trade — Quarter-Kelly default |
 | `HIGH_CONVICTION_PCT` | 0.015 | 1.5% when score ≥ 85 |
+| `SMALL_ACCOUNT_THRESHOLD` | 1000.0 | Below this → flat 10% sizing path |
+| `SMALL_ACCOUNT_POSITION_PCT` | 0.10 | 10% flat for sub-$1K accounts ($300→$30) |
+| `MIN_ORDER_USD` | 10.0 | Coinbase minimum. Floor for tiny accounts. |
+| `ALTFINS_DISAGREE_SIZE_MULT` | 0.50 | Halve position when altFINS TA disagrees |
 | `MAX_SAME_GROUP` | 3 | Max correlated positions per sector |
 | `MIN_RISK_REWARD` | 2.0 | Weighted TP ladder R:R minimum |
 | `DAILY_LOSS_LIMIT` | 0.05 | 5% portfolio drawdown halts trading |
 | `WEEKLY_LOSS_LIMIT` | 0.10 | 10% weekly drawdown halts trading |
+
+**RiskAgent now runs 10 checks** (was 8): the original 8 deterministic checks plus two altFINS pre-execution gates:
+- Check 9: `_check_altfins_news()` — vetoes if >40% of articles in last 4h are negative
+- Check 10: `_apply_altfins_ta_adjustment()` — halves position size if altFINS TA disagrees with our direction
 
 ### 4.2 RegimeAdaptiveEngine (`agents/regime_engine.py`)
 Regime is selected by Fear & Greed index. Each regime sets `score_threshold`, `ai_confidence_min`, `position_size_mult`, `max_positions`, `strategy`, `bias`, `stop_atr_mult`. **Note:** the floor in 4.1 clamps `score_threshold` and `ai_confidence_min` to 62 / 0.62 at the RiskAgent gate.
@@ -181,12 +204,20 @@ final   = clip(half_kelly * conviction * ai_mod, 0.005, MAX_POSITION_PCT)
 
 ### 4.5 MonitorAgent Exit Layers (`agents/monitor_agent.py`)
 1. **Hard stop** — entry − ATR × 2.5
-2. **ATR trailing stop** — activated at +ATR × 1.5, trails from highest close
+2. **ATR trailing stop** — improved 2026-04-13, see below
 3. **TP1** — +1.5R, close 33%, move stop to breakeven
 4. **TP2** — +3R, close 33% of remaining
 5. **TP3** — +5R, close all
 6. **Time exit** — 72h max, 48h if flat (±0.5%)
 7. **Signal degradation** — exit if rescore < 30 (checked every 6 cycles)
+
+**Trailing stop improvements (2026-04-13):**
+- **(A) Trail from highest CLOSE** — high watermark updated at scan cycle only, not from wick high
+- **(B) ATR activation distance** — trailing doesn't start until profit ≥ 1.5×ATR(14). Fallback 5% fixed if ATR unavailable (was 1.2%)
+- **(C) Hybrid ATR trailing** — start at 3×ATR distance, tighten to 2×ATR after profit reaches +1.5R
+- **(D) Regime-calibrated alpha** — `low_vol=2.0`, `normal=2.5`, `high_vol=3.5` (based on avg ATR% across positions)
+- **(E) No-widening stops** — once a stop is set, it can only move UP (for longs): `new_stop = max(old_stop, calculated_stop)`
+- **(F) Capitulation threshold override** — score threshold raised from 62→75 when F&G < 20 (implemented in RiskAgent `_check_signal_threshold`)
 
 ---
 
@@ -198,7 +229,7 @@ final   = clip(half_kelly * conviction * ai_mod, 0.005, MAX_POSITION_PCT)
 | 2 | **CoinGecko (free)** | OHLCV warmup, trending tokens, market cap context | Free |
 | 3 | **CoinMarketCap** | Real-time market cap change, volume spikes | Free tier (key active) |
 | 4 | **Coinbase Advanced** | Live spot prices, sub-minute candles, order book | Free (key active) |
-| 5 | **altFINS** | Aggregated technical signal score | Free tier |
+| 5 | **altFINS** | Enrichment layer: chart patterns, crossover signals, oversold-in-uptrend screener, TA confirmation, news sentiment. 14 MCP tools available. Credit budget: **65K/month, current usage ~9,120/month** | Free tier |
 | 6 | **Alternative.me F&G** | Fear & Greed index | Free |
 | 7 | **DeFiLlama** | TVL, protocol yields, chain TVL | Free |
 | **Execution** | **Alpaca Paper API** | Paper account ($100K) — main.py | Free |
@@ -236,13 +267,13 @@ No LLM is in the gate. The gate is plain Python with hard floors.
 
 3. **DeepSeek not wired into live signal generation** — only runs in the nightly alpha-mining job. Original spec called for DeepSeek as a third model in the consensus chain. Decision deferred until Qwen3+Llama latency is acceptable (currently ~70s end-to-end). Adding DeepSeek (45-60s) would push a single signal cycle past 2 minutes.
 
-4. **$300 account position sizing needs recalibration** — `MAX_POSITION_PCT=0.01` gives a $3 position on $300, below `MIN_ORDER_USD=$10`. Live engine currently can't open trades on the $300 account at all. Need a separate sizing path for sub-$1K accounts or raise position % to ~10% for tiny accounts. Decision pending.
+4. **~~$300 account position sizing~~ RESOLVED 2026-04-13** — sub-$1K accounts now use flat 10% of equity (`SMALL_ACCOUNT_POSITION_PCT=0.10`). $300 account → $30 order. $50 account → $10 (MIN_ORDER_USD floor). Accounts ≥$1K keep Half-Kelly. Tests: `test_small_account_300_dollars_sizes_to_30`, `test_small_account_50_dollars_floors_at_min_order`, `test_large_account_1k_uses_kelly_path`.
 
 5. **Stale main.py processes survive launchctl restart** — observed twice this week. After `launchctl stop com.signalforge.v2`, child processes from the previous run remain. Manual `kill` required. Root cause unknown — possibly Python multi-process from a library, or signal handler issue in `main.py`.
 
 6. **Whale trigger "+20% confidence boost" is informational only** — `_on_whale_signal` logs the boost but doesn't actually plumb it into the AIAnalyst prompt or scoring. Needs cross-agent state passing.
 
-7. **`_bearish_block_until` does not persist across restarts** — lives on the engine instance only. If you restart `live.py` during a 12hr block, it clears. Should be persisted to `live_repo`.
+7. **`_whale_events` rolling window does not persist across restarts** — replaced the single-event `_bearish_block_until` with a rolling 12h net-flow model on 2026-04-10, but the `_whale_events` list still lives in memory only. If you restart `live.py` during an active block, it clears. Should be persisted to `live_repo`.
 
 ---
 
@@ -297,3 +328,114 @@ ps aux | grep -E "live\.py|main\.py" | grep -v grep
 If you see more than 2 lines, kill the duplicates. Multiple instances writing to the same SQLite DB cause race conditions and inflated event counts.
 
 When editing existing code, read **only** the specific function or class you need to change. Do not re-read whole files unless investigating cross-cutting behavior.
+
+---
+
+## 10. altFINS Enrichment Layer
+
+**File:** `agents/altfins_enrichment.py`
+**Class:** `AltFINSEnrichment`
+**Started by:** both `main.py` and `live.py` in their `run()` methods.
+
+### 10.1 Background Polling (no EventBus, direct MCP calls)
+
+| Feature | MCP Tool | Poll interval | Score bonus | Credit est/mo |
+|---|---|---|---|---|
+| Chart patterns | `pattern_getCryptoPatternData` | 4h | +12 pts (≥67% success, BUY) | ~180 |
+| Oversold in Uptrend | `screener_getAltfinsScreenerData` | 15min | +20 pts (RSI<30 + SMA200 UP + mcap>$100M) | ~2,880 |
+| SMA 50/200 Golden Cross | `signal_feed_data` | 15min | +12 pts | ~2,880 (shared) |
+| EMA 12/50 crossover | `signal_feed_data` | 15min | +8 pts | (shared) |
+| EMA 100/200 crossover | `signal_feed_data` | 15min | +10 pts | (shared) |
+| MACD signal crossover | `signal_feed_data` | 15min | +6 pts | (shared) |
+| RSI 14 exits oversold | `signal_feed_data` | 15min | +8 pts | (shared) |
+
+All bonuses are **additive** to the composite score via `scoring.py`'s `altfins_bonus` parameter. Max capped at 35 pts total (prevents a single enrichment source from dominating).
+
+### 10.2 Pre-Execution Checks (per-trade, called by RiskAgent)
+
+| Feature | MCP Tool | Cache TTL | Action | Credit est/mo |
+|---|---|---|---|---|
+| TA confirmation | `technicalAnalysis_getTechnicalAnalysisData` | 5 min | Halve size on disagree; log on agree | ~150 |
+| News sentiment | `news_getCryptoNewsMessages` | 5 min | Veto if >40% of last-4h articles negative | ~150 |
+
+### 10.3 Credit Budget
+
+**Target:** 65,000 credits/month
+**Current estimated usage:** ~9,120 credits/month (14% of budget)
+**Headroom for expansion:** ~56K credits available
+
+### 10.4 altFINS MCP Tools Available (14 total)
+
+```
+screener_getAltfinsScreenerData      — primary screening engine
+screener_getAltfinsScreenerDataTypes — available field IDs
+signal_feed_data                     — trading signals (bullish/bearish)
+pattern_getCryptoPatternData         — chart pattern signals
+technicalAnalysis_getTechnicalAnalysisData — curated TA summary
+analytics_getAnalyticsTypes          — available analytics types
+analytics_getAllLatestHistoryData     — latest indicator values
+analytics_getHistoryData             — historical indicator time series
+ohlc_getLatestData                   — latest OHLCV
+ohlc_getHistoryData                  — historical OHLCV
+news_getCryptoNewsMessages           — crypto news articles
+news_getCryptoNewsSources            — available news sources
+getCryptoCalendarEvents              — upcoming events (AMAs, listings)
+getUserPortfolio                     — user portfolio (not used)
+```
+
+---
+
+## 11. Backtest Framework
+
+### 11.1 Historical Backtest (`scripts/historical_backtest.py`)
+- 90-day replay of our scoring pipeline on real Coinbase OHLCV
+- Runs at thresholds 55, 62, 68
+- 531 trades at thr=55, 52.5% win, Sharpe 19.43 (from 2026-04-10 run)
+- Uses Coinbase Exchange public API (Binance is HTTP 451 from US)
+- Writes to `data/backtest_trades.db`
+
+### 11.2 altFINS Comparison (`scripts/altfins_comparison.py`)
+- 3-variant comparison: our-signals vs altfins-only vs combined
+- **Status:** Variants B and C produce 0 trades because altFINS free tier returns no historical signals via `signal_feed_data`. The API is real-time only.
+- **Path forward:** `altfins_shadow.py` is accumulating data 24/7 via launchd. Re-run the comparison in 2-4 weeks when we have enough signal history.
+
+### 11.3 Backtest Report (`scripts/backtest_report.py`)
+```bash
+PYTHONPATH=. python scripts/backtest_report.py
+PYTHONPATH=. python scripts/backtest_report.py --db data/altfins_comparison.db
+PYTHONPATH=. python scripts/backtest_report.py --days 7 --regime capitulation
+```
+
+---
+
+## 12. Role Split
+
+| Agent | Owns | Does NOT do |
+|---|---|---|
+| **Claude Code** | All local code in `~/signal-forge-v2/` and `~/signalforge-lite/`. Edits agents, writes tests, runs backtests, manages git, deploys via launchd, builds dashboards. | Pick coins, set thresholds, approve trades, access .env/secrets |
+| **Perplexity Computer** | Research, intelligence feeds, strategy docs (written to `~/signal-forge/docs/`). Evaluates Claude's work via MCP server. Designs altFINS integration strategies. | Edit code, restart engines, commit to git, place orders |
+
+**Strategy docs location:** `~/signal-forge/docs/` — files authored by Perplexity Computer. Claude reads these as specs but does not write to that directory.
+
+---
+
+## 13. Sibling Project: signalforge-lite
+
+**Repo:** `nycsav/signalforge-lite` — `~/signalforge-lite/`
+**Purpose:** lean, backtest-first trading system using altFINS as primary intelligence. No LLM, no EventBus, no multi-agent orchestration. Tests the hypothesis: "Are altFINS signals good enough on their own?"
+
+Completely independent from signal-forge-v2 — no shared code, no shared imports, separate git repo, separate venv. Can be deleted without affecting production.
+
+---
+
+## 14. Launchd Daemons
+
+| Plist | Label | Engine | KeepAlive |
+|---|---|---|---|
+| `com.signalforge.v2.plist` | `com.signalforge.v2` | `main.py` (paper) | ✅ |
+| `com.signalforge.live.plist` | `com.signalforge.live` | `live.py` (live $300) | ✅ |
+| `com.signalforge.altfins-shadow.plist` | `com.signalforge.altfins-shadow` | `altfins_shadow.py` | ✅ |
+| `com.signalforge.ollama.plist` | `com.signalforge.ollama` | `ollama serve` | ✅ |
+| `com.signalforge.nightly-deepseek.plist` | `com.signalforge.nightly-deepseek` | DeepSeek cron (2am) | cron |
+
+All plists live in `~/Library/LaunchAgents/`. Load/unload with `launchctl load/unload <path>`.
