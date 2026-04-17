@@ -56,6 +56,10 @@ class SignalForgeOrchestrator:
         self.technical = TechnicalAgent(self.bus)
         self.sentiment = SentimentAgent(self.bus, config)
         self.onchain = OnChainAgent(self.bus, config)
+        self.altfins = AltFINSEnrichment(
+            api_key=config.get("altfins_api_key", ""),
+            watchlist=config.get("watchlist", []),
+        )
         self.ai_analyst = AIAnalystAgent(self.bus, config, self.scorer)
 
         # Tier 3 agents
@@ -65,11 +69,9 @@ class SignalForgeOrchestrator:
         self.learning = LearningAgent(self.bus, settings.database_path)
         self.whale_trigger = WhaleTrigger(event_bus=self.bus, on_signal=self._on_whale_signal)
         self.chart_patterns = ChartPatternAgent(self.bus)
-        self.altfins = AltFINSEnrichment(
-            api_key=config.get("altfins_api_key", ""),
-            watchlist=config.get("watchlist", []),
-        )
         self.regime = RegimeAdaptiveEngine(settings.database_path)
+        # Unstable features disabled during stabilization (2026-04-17):
+        # PerformanceAnalyzer, AgentRanking, LayeredMemory — will re-add after paper validation
 
         # Orchestrator state for bundle assembly
         self._market_states: dict = {}
@@ -177,11 +179,12 @@ class SignalForgeOrchestrator:
         if bundle.sentiment_stale and bundle.onchain_stale:
             bundle.max_allowed_confidence = 0.65
 
-        # Log the signal (with altFINS enrichment bonus)
+        # Log the signal (with altFINS enrichment bonus + Fibonacci)
         tech_score = self.scorer.score_technical(technical)
         sent_score = self.scorer.score_sentiment(bundle.sentiment) if bundle.sentiment else 50
         onchain_score = self.scorer.score_onchain(bundle.on_chain) if bundle.on_chain else 50
         altfins_bonus = self.altfins.get_total_bonus(symbol)
+
         composite, breakdown = self.scorer.composite_score(
             tech_score, sent_score, onchain_score, altfins_bonus=altfins_bonus,
         )

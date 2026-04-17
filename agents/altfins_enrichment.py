@@ -68,6 +68,7 @@ class AltFINSEnrichment:
         self._pattern_last_poll: float = 0
         self._screener_last_poll: float = 0
         self._crossover_last_poll: float = 0
+        self._mcp_cache: dict[str, list[dict]] = {}  # backoff fallback cache
 
     # ── Background loops ─────────────────────────────────────────
 
@@ -104,19 +105,43 @@ class AltFINSEnrichment:
 
     # ── Data fetchers (MCP) ──────────────────────────────────────
 
-    async def _mcp_call(self, tool_name: str, arguments: dict) -> list[dict]:
-        """Single MCP tool call. Returns parsed list of items."""
+    async def _mcp_call(self, tool_name: str, arguments: dict, max_retries: int = 3) -> list[dict]:
+        """Single MCP tool call with exponential backoff on rate limits."""
         try:
             from mcp.client.streamable_http import streamablehttp_client
             from mcp import ClientSession
         except ImportError:
             return []
-        headers = {"X-Api-Key": self.api_key}
-        async with streamablehttp_client(ALTFINS_MCP_URL, headers=headers) as (r, w, _):
-            async with ClientSession(r, w) as session:
-                await session.initialize()
-                result = await session.call_tool(tool_name, arguments=arguments)
-                return self._parse_result(result)
+
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                headers = {"X-Api-Key": self.api_key}
+                async with streamablehttp_client(ALTFINS_MCP_URL, headers=headers) as (r, w, _):
+                    async with ClientSession(r, w) as session:
+                        await session.initialize()
+                        result = await session.call_tool(tool_name, arguments=arguments)
+                        parsed = self._parse_result(result)
+                        # Cache successful results for fallback
+                        self._mcp_cache[f"{tool_name}_{hash(str(arguments))}"] = parsed
+                        return parsed
+            except Exception as e:
+                last_error = e
+                wait = 2 ** attempt * 5  # 5s, 10s, 20s
+                if "rate" in str(e).lower() or "429" in str(e) or "limit" in str(e).lower():
+                    logger.warning(f"altFINS rate limited ({tool_name}), retry {attempt+1}/{max_retries} in {wait}s")
+                else:
+                    logger.warning(f"altFINS error ({tool_name}): {e}, retry {attempt+1}/{max_retries} in {wait}s")
+                await asyncio.sleep(wait)
+
+        # All retries failed — return cached data if available
+        cache_key = f"{tool_name}_{hash(str(arguments))}"
+        cached = self._mcp_cache.get(cache_key, [])
+        if cached:
+            logger.warning(f"altFINS {tool_name}: retries exhausted, using cached ({len(cached)} items)")
+            return cached
+        logger.error(f"altFINS {tool_name}: retries exhausted, no cache: {last_error}")
+        return []
 
     @staticmethod
     def _parse_result(result) -> list[dict]:
@@ -141,9 +166,10 @@ class AltFINSEnrichment:
     async def _fetch_patterns(self):
         """Fetch chart patterns for all watchlist coins. Filter for quality."""
         items = await self._mcp_call("pattern_getCryptoPatternData", {
-            "coins": self.watchlist,
             "size": 100,
         })
+        if not items:
+            logger.info("altFINS patterns: 0 results (endpoint may require paid tier)")
         self._pattern_cache.clear()
         accepted = 0
         for p in items:
@@ -170,11 +196,15 @@ class AltFINSEnrichment:
     async def _fetch_oversold_uptrend(self):
         """Query screener for RSI14 < 30 AND SMA200 trend UP AND mcap > $100M."""
         items = await self._mcp_call("screener_getAltfinsScreenerData", {
-            "coins": self.watchlist,
+            "symbols": self.watchlist,
             "displayTypes": [
                 "RSI14",
                 "LONG_TERM_TREND",
                 "MARKET_CAP",
+            ],
+            "numericFilters": [
+                {"numericFilterType": "RSI14", "lteFilter": OVERSOLD_RSI_THRESHOLD},
+                {"numericFilterType": "MARKET_CAP", "gteFilter": 100_000_000},
             ],
             "size": len(self.watchlist),
         })
@@ -184,7 +214,7 @@ class AltFINSEnrichment:
             extra = row.get("additionalData") or row.get("additional_data") or row
 
             rsi_raw = extra.get("RSI14") or extra.get("rsi14")
-            trend_raw = extra.get("LONG_TERM_TREND") or extra.get("longTermTrend") or ""
+            trend_raw = str(extra.get("LONG_TERM_TREND") or extra.get("longTermTrend") or "").lower()
             mcap_raw = extra.get("MARKET_CAP") or extra.get("marketCap")
 
             try:
@@ -192,11 +222,12 @@ class AltFINSEnrichment:
             except (ValueError, TypeError):
                 rsi = 50
             try:
-                mcap = float(mcap_raw) if mcap_raw is not None else 0
+                mcap = float(str(mcap_raw).replace(",", "")) if mcap_raw is not None else 0
             except (ValueError, TypeError):
                 mcap = 0
 
-            trend_up = any(kw in str(trend_raw).lower() for kw in ("up", "strong up", "bullish"))
+            # Trend format from altFINS: "Up (7/10)", "Strong Up (10/10)", etc.
+            trend_up = "up" in trend_raw and "down" not in trend_raw
 
             if rsi < OVERSOLD_RSI_THRESHOLD and trend_up and mcap > 100_000_000:
                 matches.add(sym)
@@ -205,6 +236,8 @@ class AltFINSEnrichment:
                     f"trend={trend_raw} mcap=${mcap/1e9:.1f}B"
                 )
 
+        if not matches:
+            logger.info(f"altFINS screener: {len(items)} results, 0 match oversold+uptrend filter")
         self._oversold_uptrend = matches
         self._screener_last_poll = time.time()
 
@@ -217,7 +250,12 @@ class AltFINSEnrichment:
         top20 = self.watchlist[:20]
 
         items = await self._mcp_call("signal_feed_data", {
-            "coins": top20,
+            "symbols": top20,
+            "signals": [
+                "FRESH_MOMENTUM_MACD_SIGNAL_LINE_CROSSOVER",
+                "EMA_12_50_CROSSOVERS",
+                "MOMENTUM_RSI_CONFIRMATION",
+            ],
             "direction": "BULLISH",
             "fromDate": from_str,
             "toDate": to_str,
@@ -230,6 +268,10 @@ class AltFINSEnrichment:
             sym = (sig.get("symbol") or "").upper()
             sig_key = (sig.get("signalKey") or sig.get("signal_key") or "").upper()
             sig_name = (sig.get("signalName") or sig.get("name") or "").lower()
+
+            # Skip bearish signals (API may return both despite direction filter)
+            if "bearish" in sig_name:
+                continue
 
             # Match against known crossover signal types
             bonus = 0
@@ -250,6 +292,8 @@ class AltFINSEnrichment:
         self._crossover_last_poll = time.time()
         if matched:
             logger.info(f"altFINS crossovers: {matched} signals matched for {len(new_cache)} symbols")
+        else:
+            logger.info(f"altFINS crossovers: {len(items)} raw signals, 0 matched known crossover types")
 
     # ── Scoring lookups (pure, no I/O) ───────────────────────────
 

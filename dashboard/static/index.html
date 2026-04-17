@@ -108,6 +108,33 @@ tr:hover { background: #1c2128; }
   </div>
 </div>
 
+<div class="grid-2">
+  <div class="card">
+    <h3>Trade Outcomes (Closed)</h3>
+    <table>
+      <thead><tr><th>Symbol</th><th>P&L %</th><th>P&L $</th><th>Exit</th><th>Hold</th><th>Consensus</th><th>Lesson</th></tr></thead>
+      <tbody id="outcomes-tbody"></tbody>
+    </table>
+    <p id="no-outcomes" style="text-align:center; padding:16px; color:#8b949e">No closed trades yet</p>
+  </div>
+  <div class="card">
+    <h3>Whale Activity (24h)</h3>
+    <div id="whale-summary" style="margin-bottom:12px; font-size:14px"></div>
+    <table>
+      <thead><tr><th>Type</th><th>Details</th><th>Time</th></tr></thead>
+      <tbody id="whale-tbody"></tbody>
+    </table>
+    <p id="no-whales" style="text-align:center; padding:16px; color:#8b949e">No whale events</p>
+  </div>
+</div>
+
+<div style="padding: 0 16px 16px">
+  <div class="card">
+    <h3>Connectors & Data Sources</h3>
+    <div class="grid" style="padding:0" id="connector-grid"></div>
+  </div>
+</div>
+
 <script>
 const $ = id => document.getElementById(id);
 const money = v => { v = Number(v)||0; return (v<0?'-':'')+'$'+Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}); };
@@ -202,8 +229,73 @@ async function fetchPerf() {
   } catch(e) {}
 }
 
+async function fetchOutcomes() {
+  try {
+    let r = await fetch('/api/trade-outcomes?limit=20'); let d = await r.json();
+    let outcomes = d.outcomes||[];
+    let s = d.summary||{};
+    if (!outcomes.length) { $('outcomes-tbody').innerHTML=''; $('no-outcomes').style.display='block'; return; }
+    $('no-outcomes').style.display='none';
+    $('outcomes-tbody').innerHTML = outcomes.slice(0,15).map(t => {
+      let pp = t.pnl_pct||0;
+      let badge = pp>0?'badge-green':'badge-red';
+      let hold_h = Math.round((t.hold_minutes||0)/60);
+      return `<tr><td><b>${t.symbol||''}</b></td>
+        <td><span class="badge ${badge}">${pct(pp)}</span></td>
+        <td class="${cls(t.pnl_usd)}">${money(t.pnl_usd)}</td>
+        <td>${t.exit_reason||'--'}</td>
+        <td>${hold_h}h</td>
+        <td>${t.consensus?'Y':'N'}</td>
+        <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${(t.lesson||'').substring(0,50)}</td></tr>`;
+    }).join('');
+  } catch(e) {}
+}
+
+async function fetchWhales() {
+  try {
+    let r = await fetch('/api/whales?hours=24'); let d = await r.json();
+    let s = d.summary||{};
+    $('whale-summary').innerHTML = `<span class="positive">${s.bullish||0} Bullish</span> / <span class="negative">${s.bearish||0} Bearish</span> <span class="neutral">(${s.total||0} total)</span>`;
+    let events = d.events||[];
+    if (!events.length) { $('whale-tbody').innerHTML=''; $('no-whales').style.display='block'; return; }
+    $('no-whales').style.display='none';
+    $('whale-tbody').innerHTML = events.slice(0,10).map(e => {
+      let isBull = (e.event_type||'').includes('bullish');
+      let payload = {};
+      try { payload = JSON.parse(e.payload||'{}'); } catch(x) {}
+      return `<tr><td><span class="badge ${isBull?'badge-green':'badge-red'}">${isBull?'BULL':'BEAR'}</span></td>
+        <td>${payload.reason||e.event_type||'--'}</td>
+        <td>${timeAgo(e.created_at)}</td></tr>`;
+    }).join('');
+  } catch(e) {}
+}
+
+async function fetchConnectors() {
+  try {
+    let r = await fetch('/api/connectors'); let d = await r.json();
+    let c = d.connectors||{};
+    let html = '';
+    for (let [name, info] of Object.entries(c)) {
+      let dot = info.status==='active'?'pulse-green':'pulse-red';
+      let details = '';
+      if (name==='alpaca') details = `Equity: ${money(info.equity)} | BP: ${money(info.buying_power)}`;
+      else if (name==='coinbase') details = `BTC: ${fmtPrice(info.btc_price)}`;
+      else if (name==='ollama') details = `${info.count||0} models loaded`;
+      else if (name==='fear_greed') details = `Value: ${info.value||'--'}`;
+      else if (name==='altfins') details = info.tier||'active';
+      html += `<div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-bottom:1px solid #21262d">
+        <span class="pulse ${dot}"></span>
+        <b style="width:100px">${name}</b>
+        <span style="color:#8b949e">${info.type||''}</span>
+        <span style="margin-left:auto;font-size:11px">${details}</span>
+      </div>`;
+    }
+    $('connector-grid').innerHTML = html;
+  } catch(e) {}
+}
+
 async function refreshAll() {
-  await Promise.all([fetchStatus(), fetchPrices(), fetchPositions(), fetchSignals(), fetchOrders(), fetchPerf()]);
+  await Promise.all([fetchStatus(), fetchPrices(), fetchPositions(), fetchSignals(), fetchOrders(), fetchPerf(), fetchOutcomes(), fetchWhales(), fetchConnectors()]);
 }
 refreshAll();
 setInterval(refreshAll, 30000);

@@ -203,18 +203,23 @@ final   = clip(half_kelly * conviction * ai_mod, 0.005, MAX_POSITION_PCT)
 ```
 
 ### 4.5 MonitorAgent Exit Layers (`agents/monitor_agent.py`)
-1. **Hard stop** — entry − ATR × 2.5
-2. **ATR trailing stop** — improved 2026-04-13, see below
-3. **TP1** — +1.5R, close 33%, move stop to breakeven
-4. **TP2** — +3R, close 33% of remaining
-5. **TP3** — +5R, close all
+1. **Hard stop** — entry − ATR × 2.0 (was 2.5, tightened 2026-04-16)
+2. **ATR trailing stop** — improved 2026-04-16, see below
+3. **TP1** — +2R, close 33%, move stop to breakeven (was +1.5R)
+4. **TP2** — +4R, close 33% of remaining (was +3R)
+5. **TP3** — +6R, close all (was +5R)
 6. **Time exit** — 72h max, 48h if flat (±0.5%)
 7. **Signal degradation** — exit if rescore < 30 (checked every 6 cycles)
 
-**Trailing stop improvements (2026-04-13):**
+**Win/loss asymmetry fix (2026-04-16):**
+- Old: 2.5x stop, 1.5R/3R/5R TPs → net negative (hard stops avg -1.72%, best win +1.43%)
+- New: 2.0x stop, 2R/4R/6R TPs → positive expectancy at 44%+ win rate
+- Also: consensus now mandatory (49/87 non-consensus trades lost)
+
+**Trailing stop improvements (2026-04-13, tuned 2026-04-16):**
 - **(A) Trail from highest CLOSE** — high watermark updated at scan cycle only, not from wick high
-- **(B) ATR activation distance** — trailing doesn't start until profit ≥ 1.5×ATR(14). Fallback 5% fixed if ATR unavailable (was 1.2%)
-- **(C) Hybrid ATR trailing** — start at 3×ATR distance, tighten to 2×ATR after profit reaches +1.5R
+- **(B) ATR activation distance** — trailing doesn't start until profit ≥ 1.0×ATR(14) (was 1.5). Fallback 5% fixed if ATR unavailable
+- **(C) Hybrid ATR trailing** — start at 2.5×ATR distance, tighten to 1.5×ATR after profit reaches +2R (was 3.0/2.0/1.5R)
 - **(D) Regime-calibrated alpha** — `low_vol=2.0`, `normal=2.5`, `high_vol=3.5` (based on avg ATR% across positions)
 - **(E) No-widening stops** — once a stop is set, it can only move UP (for longs): `new_stop = max(old_stop, calculated_stop)`
 - **(F) Capitulation threshold override** — score threshold raised from 62→75 when F&G < 20 (implemented in RiskAgent `_check_signal_threshold`)

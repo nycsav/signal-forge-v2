@@ -159,3 +159,103 @@ async def run_backtest_api(symbol: str, days: int = 30):
     if not candles:
         return {"error": f"No data for {symbol}"}
     return run_backtest(candles)
+
+
+@router.get("/trade-outcomes")
+async def trade_outcomes(limit: int = 50):
+    """Closed trade outcomes with full context (from trade_outcomes table)."""
+    from agents.trade_logger import get_recent_outcomes, get_win_rate_by_signal
+    outcomes = get_recent_outcomes(limit)
+    signal_stats = get_win_rate_by_signal()
+
+    wins = [t for t in outcomes if (t.get("pnl_pct") or 0) > 0]
+    losses = [t for t in outcomes if (t.get("pnl_pct") or 0) <= 0]
+
+    return {
+        "outcomes": outcomes,
+        "summary": {
+            "total": len(outcomes),
+            "wins": len(wins),
+            "losses": len(losses),
+            "win_rate": len(wins) / len(outcomes) * 100 if outcomes else 0,
+            "total_pnl_usd": sum(t.get("pnl_usd") or 0 for t in outcomes),
+            "avg_pnl_pct": sum(t.get("pnl_pct") or 0 for t in outcomes) / max(len(outcomes), 1),
+            "best_trade": max((t.get("pnl_pct") or 0 for t in outcomes), default=0),
+            "worst_trade": min((t.get("pnl_pct") or 0 for t in outcomes), default=0),
+        },
+        "by_signal": signal_stats,
+    }
+
+
+@router.get("/whales")
+async def whale_events(hours: int = 24):
+    """Recent whale activity from Arkham."""
+    import sqlite3
+    from datetime import timedelta
+    since = (datetime.now() - timedelta(hours=hours)).isoformat()
+    try:
+        conn = sqlite3.connect(str(settings.database_path), timeout=10)
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM agent_events WHERE agent_name='whale_trigger' AND created_at > ? ORDER BY id DESC LIMIT 100",
+            (since,)
+        ).fetchall()
+        conn.close()
+        whale_list = [dict(r) for r in rows]
+    except Exception:
+        whale_list = []
+    bullish = sum(1 for w in whale_list if "bullish" in (w.get("event_type") or ""))
+    bearish = sum(1 for w in whale_list if "bearish" in (w.get("event_type") or ""))
+    return {
+        "events": whale_list[:50],
+        "summary": {"total": len(whale_list), "bullish": bullish, "bearish": bearish},
+    }
+
+
+@router.get("/connectors")
+async def connector_status():
+    """Status of all trading connectors and data sources."""
+    import httpx
+
+    connectors = {}
+
+    # Alpaca
+    try:
+        account = await alpaca.get_account()
+        connectors["alpaca"] = {
+            "status": "active", "type": "paper_trading",
+            "equity": account.get("equity"), "buying_power": account.get("buying_power"),
+        }
+    except Exception as e:
+        connectors["alpaca"] = {"status": "error", "error": str(e)}
+
+    # Coinbase
+    try:
+        prices = await coinbase_client.get_all_prices(["BTC-USD"])
+        connectors["coinbase"] = {
+            "status": "active", "type": "live_execution",
+            "btc_price": prices.get("BTC-USD"),
+        }
+    except Exception:
+        connectors["coinbase"] = {"status": "error"}
+
+    # Ollama
+    try:
+        async with httpx.AsyncClient(timeout=5) as client:
+            r = await client.get(f"{settings.ollama_host}/api/tags")
+            models = [m["name"] for m in r.json().get("models", [])] if r.status_code == 200 else []
+            connectors["ollama"] = {"status": "active", "models": models, "count": len(models)}
+    except Exception:
+        connectors["ollama"] = {"status": "offline"}
+
+    # altFINS
+    connectors["altfins"] = {"status": "active", "type": "signal_intelligence", "tier": "hobbyist"}
+
+    # Fear & Greed
+    try:
+        fg = await fear_greed_client.get_fear_greed()
+        connectors["fear_greed"] = {"status": "active", "value": fg.get("value")}
+    except Exception:
+        connectors["fear_greed"] = {"status": "error"}
+
+    return {"connectors": connectors, "timestamp": datetime.now().isoformat()}

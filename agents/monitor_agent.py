@@ -24,24 +24,36 @@ from config.settings import settings
 
 
 class MonitorAgent:
-    # Exit parameters from spec Section 5
-    ATR_STOP_MULT = 2.5
-    ATR_ACTIVATION_MULT = 1.5
-    TP1_R = 1.5   # TP1 at 1.5× risk
-    TP2_R = 3.0
-    TP3_R = 5.0
+    # Exit parameters — tuned 2026-04-16 to fix win/loss asymmetry
+    # Old: 2.5x stop, 1.5R TP1 → net negative (stop too wide, TP1 too tight)
+    # New: 2.0x stop, 2R/4R/6R TPs → positive expectancy at 44%+ win rate
+    ATR_STOP_MULT = 2.0
+    ATR_ACTIVATION_MULT = 1.0   # activate trailing sooner (was 1.5)
+    TP1_R = 2.0   # TP1 at 2× risk (was 1.5)
+    TP2_R = 4.0   # TP2 at 4× risk (was 3.0)
+    TP3_R = 6.0   # TP3 at 6× risk (was 5.0)
     MAX_HOLD_HOURS = 72
     FLAT_HOURS = 48
     FLAT_THRESHOLD = 0.005  # ±0.5%
     FIXED_TRAIL_FALLBACK_PCT = 0.05   # 5% fixed if ATR unavailable
 
-    # Hybrid ATR trailing: start at 3×ATR, tighten to 2×ATR after +1.5R profit
-    TRAIL_ATR_INITIAL = 3.0
-    TRAIL_ATR_TIGHT = 2.0
-    TRAIL_TIGHTEN_R = 1.5  # tighten after profit >= 1.5× initial risk
+    # Hybrid ATR trailing: start at 2.5×ATR, tighten to 1.5×ATR after +2R profit
+    TRAIL_ATR_INITIAL = 2.5   # was 3.0
+    TRAIL_ATR_TIGHT = 1.5     # was 2.0
+    TRAIL_TIGHTEN_R = 2.0     # tighten after bigger profit (was 1.5)
 
     # Regime-calibrated alpha (multiplied by ATR for trailing distance)
     REGIME_ALPHA = {"low_vol": 2.0, "normal": 2.5, "high_vol": 3.5}
+
+    # Volume confirmation gate (added 2026-04-16)
+    # Don't trigger trailing stop on low-volume wicks — require close below stop
+    VOL_CONFIRM_THRESHOLD = 0.5   # if volume < 50% of 20-period avg, require confirmation
+    VOL_LOOKBACK = 20             # periods for volume SMA
+
+    # ATR spike detection — widen trail during volatility spikes
+    ATR_SMA_LOOKBACK = 10         # SMA of ATR for spike detection
+    ATR_SPIKE_MULT = 1.5          # ATR > 1.5x SMA(ATR) = spike
+    ATR_SPIKE_WIDEN = 0.5         # add 0.5x to trail during spikes
 
     def __init__(self, event_bus: EventBus, db_path: str):
         self.bus = event_bus
@@ -98,6 +110,9 @@ class MonitorAgent:
                     "tp1_hit": False,
                     "tp2_hit": False,
                     "first_seen": first_seen,
+                    "volumes": [],           # rolling volume history
+                    "atr_history": [],        # rolling ATR for spike detection
+                    "vol_pending_confirm": False,  # volume gate: waiting for close confirmation
                 }
 
             state = self._state[symbol]
@@ -121,6 +136,22 @@ class MonitorAgent:
                 # (B) Fallback to 5% fixed if ATR unavailable (was 1.2%)
                 atr = entry * self.FIXED_TRAIL_FALLBACK_PCT
 
+            # Track ATR history for spike detection
+            atr_history = state.get("atr_history", [])
+            atr_history.append(atr)
+            if len(atr_history) > 50:
+                atr_history = atr_history[-50:]
+            state["atr_history"] = atr_history
+
+            # Fetch and track volume for confirmation gate
+            vol = await self._fetch_coinbase_volume(symbol)
+            volumes = state.get("volumes", [])
+            if vol > 0:
+                volumes.append(vol)
+                if len(volumes) > 50:
+                    volumes = volumes[-50:]
+                state["volumes"] = volumes
+
             risk = atr * self.ATR_STOP_MULT
             stop = entry - risk
 
@@ -137,23 +168,34 @@ class MonitorAgent:
             # (D) Regime-calibrated alpha — from regime engine state
             regime_alpha = self._get_regime_alpha()
 
-            # ── Layer 1: Hard Stop ──
+            # ── Layer 1: Hard Stop (with volume confirmation gate) ──
             if current <= stop:
+                # Volume gate: if very low volume, delay 1 cycle to confirm
+                # This prevents exits on liquidity sweep wicks
+                if not self._is_volume_confirmed(state, vol) and not state.get("hard_stop_pending"):
+                    state["hard_stop_pending"] = True
+                    logger.info(f"Monitor HARD STOP: {symbol} breached but LOW VOLUME — confirming next cycle")
+                    continue
+                state["hard_stop_pending"] = False
                 await self._close_position(pos, "hard_stop", current)
                 actions_taken += 1
                 continue
+            else:
+                state["hard_stop_pending"] = False
 
-            # ── Layer 2: Hybrid ATR Trailing Stop ──
+            # ── Layer 2: Hybrid ATR Trailing Stop (enhanced 2026-04-16) ──
             if current >= activation:
                 state["trailing_active"] = True
 
             if state["trailing_active"]:
-                # (C) Hybrid: start at 3×ATR, tighten to 2×ATR after +1.5R profit
                 profit_r = (current - entry) / risk if risk > 0 else 0
-                if profit_r >= self.TRAIL_TIGHTEN_R:
-                    trail_mult = self.TRAIL_ATR_TIGHT  # tightened: 2×ATR
-                else:
-                    trail_mult = self.TRAIL_ATR_INITIAL  # initial: 3×ATR
+
+                # Stepped trailing: progressive tightening at profit milestones
+                trail_mult = self._stepped_trail_mult(profit_r)
+
+                # ATR spike detection: widen trail during volatility spikes
+                if self._is_atr_spike(state, atr):
+                    trail_mult += self.ATR_SPIKE_WIDEN
 
                 # (D) Apply regime alpha overlay
                 trail_distance = atr * min(trail_mult, regime_alpha)
@@ -166,9 +208,20 @@ class MonitorAgent:
                 state["trailing_stop_price"] = new_stop
 
                 if current <= new_stop:
+                    # Volume confirmation gate: don't exit on low-volume wicks
+                    if not self._is_volume_confirmed(state, vol):
+                        if not state.get("vol_pending_confirm"):
+                            state["vol_pending_confirm"] = True
+                            logger.info(f"Monitor TRAIL: {symbol} breached stop but LOW VOLUME — waiting for confirmation")
+                        continue  # skip exit, wait for next cycle to confirm
+                    state["vol_pending_confirm"] = False
+
                     await self._close_position(pos, "trailing_stop", current)
                     actions_taken += 1
                     continue
+                else:
+                    # Price recovered above stop — clear pending confirmation
+                    state["vol_pending_confirm"] = False
 
             # ── Layer 3: TP1 — close 33%, move stop to breakeven ──
             if current >= tp1 and not state["tp1_hit"]:
@@ -274,6 +327,24 @@ class MonitorAgent:
             )
         except Exception as e:
             logger.debug(f"Trade log failed: {e}")
+
+        # Also update the trades table so LearningAgent data stays consistent
+        try:
+            from db.repository import Repository
+            from config.settings import settings
+            repo = Repository(settings.database_path)
+            # Find matching open trade and close it
+            open_trades = repo.get_open_trades()
+            for t in open_trades:
+                if t.get("symbol") == symbol:
+                    repo.update_trade(t["id"],
+                        status="closed", exit_price=price,
+                        pnl_usd=pnl_usd, pnl_pct=pnl_pct,
+                        closed_at=datetime.now().isoformat(),
+                        close_reason=reason)
+                    break
+        except Exception as e:
+            logger.debug(f"Trade table update failed: {e}")
 
         # Close on Alpaca
         headers = {"APCA-API-KEY-ID": self.alpaca_key, "APCA-API-SECRET-KEY": self.alpaca_secret}
@@ -398,3 +469,52 @@ class MonitorAgent:
             except Exception as e:
                 logger.error(f"Monitor: Alpaca fetch failed: {e}")
         return []
+
+    async def _fetch_coinbase_volume(self, symbol: str) -> float:
+        """Fetch latest 1h candle volume from Coinbase for volume confirmation."""
+        product = symbol if "-USD" in symbol else f"{symbol}-USD"
+        try:
+            async with httpx.AsyncClient(timeout=8) as client:
+                r = await client.get(
+                    f"https://api.exchange.coinbase.com/products/{product}/candles",
+                    params={"granularity": 3600, "limit": 1},
+                )
+                if r.status_code == 200:
+                    candles = r.json()
+                    if candles:
+                        return float(candles[0][5])  # [time, low, high, open, close, volume]
+        except Exception:
+            pass
+        return 0.0
+
+    def _is_volume_confirmed(self, state: dict, current_vol: float) -> bool:
+        """Check if current volume is sufficient to confirm a stop trigger.
+        Returns False if volume is too low (wick on thin liquidity)."""
+        volumes = state.get("volumes", [])
+        if len(volumes) < self.VOL_LOOKBACK:
+            return True  # not enough history, assume confirmed
+
+        vol_sma = sum(volumes[-self.VOL_LOOKBACK:]) / self.VOL_LOOKBACK
+        if vol_sma <= 0:
+            return True
+
+        return current_vol >= vol_sma * self.VOL_CONFIRM_THRESHOLD
+
+    def _is_atr_spike(self, state: dict, current_atr: float) -> bool:
+        """Detect ATR volatility spike — widen trail during spikes."""
+        atr_history = state.get("atr_history", [])
+        if len(atr_history) < self.ATR_SMA_LOOKBACK:
+            return False
+
+        atr_sma = sum(atr_history[-self.ATR_SMA_LOOKBACK:]) / self.ATR_SMA_LOOKBACK
+        return current_atr > atr_sma * self.ATR_SPIKE_MULT if atr_sma > 0 else False
+
+    def _stepped_trail_mult(self, profit_r: float) -> float:
+        """Stepped trailing: progressive tightening based on profit milestones.
+        Returns the ATR multiplier for the trailing stop distance."""
+        if profit_r >= 3.0:
+            return self.TRAIL_ATR_TIGHT     # 1.5x ATR — tight
+        elif profit_r >= 2.0:
+            return 2.0                       # 2.0x ATR — medium
+        else:
+            return self.TRAIL_ATR_INITIAL    # 2.5x ATR — initial

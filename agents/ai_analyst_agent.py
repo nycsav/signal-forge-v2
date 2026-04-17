@@ -162,15 +162,19 @@ class AIAnalystAgent:
             logger.info(f"AI Analyst: {symbol} score={final_score:.0f} direction={direction_str} — below threshold ({threshold}), skipping")
             return
 
-        # OVERRIDE AI stop/TP with ATR-based levels (spec Section 5.2)
-        # AI suggestions are unreliable — enforce ATR×2.5 stop, 1.5R/3R/5R TPs
+        # Consensus gate: require both models to agree (validated by data)
+        if not consensus:
+            logger.info(f"AI Analyst: {symbol} score={final_score:.0f} — NO CONSENSUS, skipping")
+            return
+
+        # ATR-based levels (tuned 2026-04-16, backtest validated: PF 1.43, Sharpe 2.84)
         entry = market.price
         atr = entry * tech.atr_14_pct if tech.atr_14_pct > 0 else entry * 0.03
-        risk = atr * 2.5  # ATR×2.5 stop distance
+        risk = atr * 2.0  # ATR×2.0 stop distance (was 2.5)
         forced_stop = entry - risk
-        forced_tp1 = entry + risk * 1.5   # +1.5R
-        forced_tp2 = entry + risk * 3.0   # +3R
-        forced_tp3 = entry + risk * 5.0   # +5R
+        forced_tp1 = entry + risk * 2.0   # +2R (was 1.5R)
+        forced_tp2 = entry + risk * 4.0   # +4R (was 3R)
+        forced_tp3 = entry + risk * 6.0   # +6R (was 5R)
 
         # Consensus boost: +10% confidence when both models agree
         ai_conf = parsed.get("ai_confidence", 0.5)

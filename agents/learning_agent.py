@@ -181,7 +181,23 @@ class LearningAgent:
         return self._compute_sharpe(trades)
 
     def _load_trade_history(self, limit: int = 200) -> list[dict]:
-        return self.repo.get_recent_trades(limit)
+        # Fix 2026-04-16: Read from trade_outcomes (real P&L data), not trades
+        # table (which has all pnl=0 due to missing close updates).
+        # Also join score_breakdown from signals_log for weight optimization.
+        from agents.trade_logger import get_recent_outcomes
+        outcomes = get_recent_outcomes(limit)
+        # Enrich with score_breakdown from signals_log where possible
+        for t in outcomes:
+            if not t.get("score_breakdown"):
+                sym = t.get("symbol", "")
+                rows = self.repo._conn().execute(
+                    "SELECT score_breakdown FROM signals_log WHERE symbol=? "
+                    "AND score_breakdown IS NOT NULL ORDER BY id DESC LIMIT 1",
+                    (sym,)
+                ).fetchall()
+                if rows:
+                    t["score_breakdown"] = dict(rows[0]).get("score_breakdown")
+        return outcomes
 
     def _compute_sharpe(self, trades: list, risk_free: float = 0.0434) -> float:
         pnls = [t.get("pnl_pct") or 0 for t in trades]

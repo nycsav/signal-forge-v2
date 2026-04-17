@@ -49,14 +49,14 @@ DEFAULT_DAYS = 90
 DEFAULT_THRESHOLDS = [55, 62, 68]
 DEFAULT_DB = PROJECT_ROOT / "data" / "backtest_trades.db"
 
-# Exit parameters — mirror MonitorAgent
-ATR_STOP_MULT = 2.5
-TP1_ATR_MULT = 1.5
-TP2_ATR_MULT = 3.0
-TP3_ATR_MULT = 5.0
-TP1_CLOSE_PCT = 0.40
-TP2_CLOSE_PCT = 0.30
-TP3_CLOSE_PCT = 0.30
+# Exit parameters — mirror MonitorAgent (updated 2026-04-16)
+ATR_STOP_MULT = 2.0    # was 2.5
+TP1_ATR_MULT = 2.0     # was 1.5
+TP2_ATR_MULT = 4.0     # was 3.0
+TP3_ATR_MULT = 6.0     # was 5.0
+TP1_CLOSE_PCT = 0.33
+TP2_CLOSE_PCT = 0.33
+TP3_CLOSE_PCT = 0.34
 MAX_HOLD_HOURS = 72
 
 # Position sizing

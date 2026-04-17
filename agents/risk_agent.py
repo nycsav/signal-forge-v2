@@ -257,9 +257,10 @@ class RiskAgent:
         if risk <= 0:
             return True, ""
         # Use weighted average reward across TP ladder (33% TP1, 33% TP2, 34% TP3)
-        tp1_reward = abs(p.suggested_tp1 - p.suggested_entry) if p.suggested_tp1 else risk * 1.5
-        tp2_reward = abs(p.suggested_tp2 - p.suggested_entry) if p.suggested_tp2 else risk * 3.0
-        tp3_reward = abs(p.suggested_tp3 - p.suggested_entry) if p.suggested_tp3 else risk * 5.0
+        # Fallback TPs match tuned MonitorAgent values (2R/4R/6R, updated 2026-04-16)
+        tp1_reward = abs(p.suggested_tp1 - p.suggested_entry) if p.suggested_tp1 else risk * 2.0
+        tp2_reward = abs(p.suggested_tp2 - p.suggested_entry) if p.suggested_tp2 else risk * 4.0
+        tp3_reward = abs(p.suggested_tp3 - p.suggested_entry) if p.suggested_tp3 else risk * 6.0
         weighted_reward = tp1_reward * 0.33 + tp2_reward * 0.33 + tp3_reward * 0.34
         rr = weighted_reward / risk
         if rr < self.MIN_RISK_REWARD:

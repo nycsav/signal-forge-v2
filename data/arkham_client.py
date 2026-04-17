@@ -92,20 +92,24 @@ class ArkhamClient:
         if not transfers:
             return []
 
-        return [
-            {
-                "from": t.get("fromAddress", {}).get("arkhamEntity", {}).get("id", t.get("fromAddress", {}).get("address", "")[:10]),
-                "to": t.get("toAddress", {}).get("arkhamEntity", {}).get("id", t.get("toAddress", {}).get("address", "")[:10]),
+        results = []
+        for t in transfers[:limit]:
+            fa = t.get("fromAddress") or {}
+            ta = t.get("toAddress") or {}
+            fa_ent = fa.get("arkhamEntity") or {}
+            ta_ent = ta.get("arkhamEntity") or {}
+            results.append({
+                "from": fa_ent.get("id", (fa.get("address") or "")[:10]),
+                "to": ta_ent.get("id", (ta.get("address") or "")[:10]),
                 "token": t.get("tokenName", "") or t.get("tokenSymbol", ""),
                 "usd_value": t.get("unitValue", 0) or t.get("usdValue", 0) or t.get("historicalUSD", 0),
-                "chain": t.get("fromAddress", {}).get("chain", "") or t.get("chain", ""),
+                "chain": fa.get("chain", "") or t.get("chain", ""),
                 "timestamp": t.get("blockTimestamp", ""),
-                "from_label": t.get("fromAddress", {}).get("arkhamEntity", {}).get("name", "Unknown"),
-                "to_label": t.get("toAddress", {}).get("arkhamEntity", {}).get("name", "Unknown"),
+                "from_label": fa_ent.get("name", "Unknown"),
+                "to_label": ta_ent.get("name", "Unknown"),
                 "tx_hash": t.get("transactionHash", "")[:16],
-            }
-            for t in transfers[:limit]
-        ]
+            })
+        return results
 
     async def get_exchange_flows(
         self,

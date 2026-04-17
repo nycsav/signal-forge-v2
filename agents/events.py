@@ -193,3 +193,43 @@ class WeightUpdateEvent(BaseModel):
     new_weights: dict[str, float]
     training_window_trades: int = 0
     sharpe_improvement: float = 0
+
+
+# ── SELF-IMPROVING COLLABORATION EVENTS ─────────────────────
+
+class ReEntrySignalEvent(BaseModel):
+    """Emitted by MonitorAgent after a trailing stop exit in profit.
+    Tells AI Analyst to re-evaluate the symbol for re-entry."""
+    timestamp: datetime
+    symbol: str
+    exit_price: float
+    exit_reason: str
+    pnl_pct: float
+    original_direction: str
+    atr_at_exit: float
+    cooldown_bars: int = 4   # minimum bars before re-entry allowed
+
+
+class PerformanceFeedbackEvent(BaseModel):
+    """Emitted by LearningAgent after analyzing a batch of trades.
+    Broadcast to all agents so they can self-adjust."""
+    timestamp: datetime
+    window_trades: int
+    win_rate: float
+    avg_pnl_pct: float
+    sharpe: float
+    best_exit_reason: str     # which exit type produces best results
+    worst_exit_reason: str    # which exit type loses most
+    best_symbols: list[str] = Field(default_factory=list)
+    worst_symbols: list[str] = Field(default_factory=list)
+    recommended_actions: list[str] = Field(default_factory=list)
+
+
+class StrategyAdaptationEvent(BaseModel):
+    """Emitted when the system detects a regime shift or performance drift
+    and recommends parameter changes."""
+    timestamp: datetime
+    trigger: str              # "regime_shift", "performance_drift", "whale_accumulation"
+    old_params: dict = Field(default_factory=dict)
+    new_params: dict = Field(default_factory=dict)
+    reason: str = ""
