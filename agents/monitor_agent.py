@@ -101,7 +101,13 @@ class MonitorAgent:
                 first_seen = datetime.now()
                 if fill_time:
                     try:
-                        first_seen = datetime.fromisoformat(fill_time.replace("Z", "+00:00")).replace(tzinfo=None)
+                        parsed_time = datetime.fromisoformat(fill_time.replace("Z", "+00:00")).replace(tzinfo=None)
+                        # Sanity check: if fill time is > 24h ago, use now instead
+                        # This prevents stale fill times from triggering immediate time exits
+                        if (datetime.now() - parsed_time).total_seconds() < 86400:
+                            first_seen = parsed_time
+                        else:
+                            logger.warning(f"Monitor: {symbol} fill time {fill_time} is >24h old, using now()")
                     except Exception:
                         pass
                 self._state[symbol] = {
