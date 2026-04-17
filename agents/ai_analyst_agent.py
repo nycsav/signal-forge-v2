@@ -37,13 +37,17 @@ Does this make sense? JSON: {{"agrees":true/false,"reason":"5 words max"}}"""
 
 
 class AIAnalystAgent:
-    def __init__(self, event_bus: EventBus, config: dict, scorer: SignalScorer):
+    def __init__(self, event_bus: EventBus, config: dict, scorer: SignalScorer, altfins=None):
         self.bus = event_bus
         self.scorer = scorer
+        self.altfins = altfins
         self.ollama_host = config.get("ollama_host", "http://localhost:11434")
         self.primary_model = config.get("deepseek_model", "deepseek-r1:14b")
         self.fast_model = config.get("fast_model", "llama3.2:3b")
         self.bus.subscribe(SignalBundle, self._on_signal_bundle)
+
+    # Quantitative threshold — no LLM needed above this score
+    QUANT_ENTRY_THRESHOLD = 75
 
     async def _on_signal_bundle(self, bundle: SignalBundle):
         symbol = bundle.symbol
@@ -55,11 +59,49 @@ class AIAnalystAgent:
         tech_score = self.scorer.score_technical(tech)
         sent_score = self.scorer.score_sentiment(sent) if sent else 50
         onchain_score = self.scorer.score_onchain(bundle.on_chain) if bundle.on_chain else 50
-        pre_score, breakdown = self.scorer.composite_score(tech_score, sent_score, onchain_score)
+
+        # Include altFINS bonus in pre-score
+        altfins_bonus = 0.0
+        if hasattr(self, 'altfins') and self.altfins:
+            altfins_bonus = self.altfins.get_total_bonus(symbol)
+        pre_score, breakdown = self.scorer.composite_score(
+            tech_score, sent_score, onchain_score, altfins_bonus=altfins_bonus,
+        )
+
+        fg = sent.fear_greed if sent else market.fear_greed_index
+
+        # ═══ QUANTITATIVE FAST PATH ═══
+        # Score >= 75: trade immediately. No LLM pre-filter, no consensus.
+        # The quant model found a strong signal — execute it.
+        if pre_score >= self.QUANT_ENTRY_THRESHOLD:
+            entry = market.price
+            atr = entry * tech.atr_14_pct if tech.atr_14_pct > 0 else entry * 0.03
+            risk = atr * 2.0
+            confidence = min(0.95, pre_score / 100)
+
+            proposal = TradeProposal(
+                timestamp=datetime.now(),
+                proposal_id=str(uuid.uuid4()),
+                symbol=symbol,
+                direction=Direction.LONG,
+                raw_score=pre_score,
+                ai_confidence=confidence,
+                ai_rationale=f"QUANT ENTRY: score={pre_score:.0f} (tech={tech_score:.0f} sent={sent_score:.0f} altfins_bonus={altfins_bonus:.0f}) F&G={fg}",
+                suggested_entry=entry,
+                suggested_stop=entry - risk,
+                suggested_tp1=entry + risk * 2.0,
+                suggested_tp2=entry + risk * 4.0,
+                suggested_tp3=entry + risk * 6.0,
+                score_breakdown=breakdown,
+            )
+            logger.warning(f"QUANT ENTRY: {symbol} score={pre_score:.0f} conf={confidence:.0%} — bypassing LLM, sending to RiskAgent")
+            await self.bus.publish(proposal)
+            return
+
+        # ═══ Below 75: use LLM pipeline as before ═══
 
         # Build prompt fields
         stop_distance = market.price * tech.atr_14_pct * 1.5 if tech.atr_14_pct > 0 else market.price * 0.03
-        fg = sent.fear_greed if sent else market.fear_greed_index
         prompt_fields = dict(
             symbol=symbol, price=market.price, rsi=tech.rsi_14,
             fear_greed=fg, ema_aligned="YES" if tech.ema_alignment else "NO",

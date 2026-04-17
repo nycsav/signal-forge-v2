@@ -60,7 +60,7 @@ class SignalForgeOrchestrator:
             api_key=config.get("altfins_api_key", ""),
             watchlist=config.get("watchlist", []),
         )
-        self.ai_analyst = AIAnalystAgent(self.bus, config, self.scorer)
+        self.ai_analyst = AIAnalystAgent(self.bus, config, self.scorer, altfins=self.altfins)
 
         # Tier 3 agents
         self.risk = RiskAgent(self.bus, settings.database_path, settings.portfolio_value)
