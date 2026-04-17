@@ -59,34 +59,44 @@ class AIAnalystAgent:
         tech_score = self.scorer.score_technical(tech)
         sent_score = self.scorer.score_sentiment(sent) if sent else 50
         onchain_score = self.scorer.score_onchain(bundle.on_chain) if bundle.on_chain else 50
+        pre_score, breakdown = self.scorer.composite_score(tech_score, sent_score, onchain_score)
 
-        # Include altFINS bonus in pre-score
-        altfins_bonus = 0.0
-        if hasattr(self, 'altfins') and self.altfins:
-            altfins_bonus = self.altfins.get_total_bonus(symbol)
-        pre_score, breakdown = self.scorer.composite_score(
-            tech_score, sent_score, onchain_score, altfins_bonus=altfins_bonus,
-        )
+        # Use the orchestrator's composite score if available (includes altFINS bonus)
+        # The orchestrator logs the full score to signals_log before publishing the bundle.
+        # We check signals_log for the most recent score for this symbol.
+        orchestrator_score = pre_score
+        try:
+            import sqlite3
+            from config.settings import settings as _s
+            conn = sqlite3.connect(str(_s.database_path), timeout=3)
+            row = conn.execute(
+                "SELECT raw_score FROM signals_log WHERE symbol=? ORDER BY id DESC LIMIT 1", (symbol,)
+            ).fetchone()
+            conn.close()
+            if row and row[0] and row[0] > pre_score:
+                orchestrator_score = row[0]
+        except Exception:
+            pass
 
         fg = sent.fear_greed if sent else market.fear_greed_index
 
         # ═══ QUANTITATIVE FAST PATH ═══
         # Score >= 75: trade immediately. No LLM pre-filter, no consensus.
         # The quant model found a strong signal — execute it.
-        if pre_score >= self.QUANT_ENTRY_THRESHOLD:
+        if orchestrator_score >= self.QUANT_ENTRY_THRESHOLD:
             entry = market.price
             atr = entry * tech.atr_14_pct if tech.atr_14_pct > 0 else entry * 0.03
             risk = atr * 2.0
-            confidence = min(0.95, pre_score / 100)
+            confidence = min(0.95, orchestrator_score / 100)
 
             proposal = TradeProposal(
                 timestamp=datetime.now(),
                 proposal_id=str(uuid.uuid4()),
                 symbol=symbol,
                 direction=Direction.LONG,
-                raw_score=pre_score,
+                raw_score=orchestrator_score,
                 ai_confidence=confidence,
-                ai_rationale=f"QUANT ENTRY: score={pre_score:.0f} (tech={tech_score:.0f} sent={sent_score:.0f} altfins_bonus={altfins_bonus:.0f}) F&G={fg}",
+                ai_rationale=f"QUANT ENTRY: score={orchestrator_score:.0f} (tech={tech_score:.0f} sent={sent_score:.0f}) F&G={fg}",
                 suggested_entry=entry,
                 suggested_stop=entry - risk,
                 suggested_tp1=entry + risk * 2.0,
@@ -94,7 +104,7 @@ class AIAnalystAgent:
                 suggested_tp3=entry + risk * 6.0,
                 score_breakdown=breakdown,
             )
-            logger.warning(f"QUANT ENTRY: {symbol} score={pre_score:.0f} conf={confidence:.0%} — bypassing LLM, sending to RiskAgent")
+            logger.warning(f"QUANT ENTRY: {symbol} score={orchestrator_score:.0f} conf={confidence:.0%} — bypassing LLM, sending to RiskAgent")
             await self.bus.publish(proposal)
             return
 
