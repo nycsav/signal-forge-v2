@@ -170,12 +170,28 @@ class AIAnalystAgent:
         fg = sent.fear_greed if sent else market.fear_greed_index
 
         # ═══ QUANTITATIVE FAST PATH ═══
-        # Score >= 75: trade immediately. No LLM pre-filter, no consensus.
-        # The quant model found a strong signal — execute it.
+        # Score >= threshold: trade immediately, but ONLY if momentum confirms.
+        # Day 2 lesson: high scores from stale altFINS bonus + falling price = losing trades.
         if orchestrator_score >= self.QUANT_ENTRY_THRESHOLD:
+
+            # MOMENTUM FILTER 1: RSI must be > 35 and not deeply oversold/falling
+            if tech.rsi_14 < 35:
+                logger.debug(f"QUANT SKIP: {symbol} score={orchestrator_score:.0f} but RSI={tech.rsi_14:.0f} < 35")
+                return
+
+            # MOMENTUM FILTER 2: MACD histogram must not be deeply negative
+            if tech.macd_histogram < -0.5 * market.price * 0.01:  # more than -0.5% of price
+                logger.debug(f"QUANT SKIP: {symbol} score={orchestrator_score:.0f} but MACD={tech.macd_histogram:.4f} deeply negative")
+                return
+
+            # MOMENTUM FILTER 3: Price must be above lower Bollinger Band (not falling knife)
+            if tech.bb_position < 0.15:
+                logger.debug(f"QUANT SKIP: {symbol} score={orchestrator_score:.0f} but BB={tech.bb_position:.2f} — below lower band")
+                return
+
             entry = market.price
             atr = entry * tech.atr_14_pct if tech.atr_14_pct > 0 else entry * 0.03
-            risk = atr * 2.5  # matched to MonitorAgent (widened from 2.0 — too many hard stops)
+            risk = atr * 2.5
             confidence = min(0.95, orchestrator_score / 100)
 
             proposal = TradeProposal(

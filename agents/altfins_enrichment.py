@@ -318,13 +318,16 @@ class AltFINSEnrichment:
         return self._crossover_cache.get(base, 0.0)
 
     def get_total_bonus(self, symbol: str) -> float:
-        """Combined altFINS bonus for scoring. Max capped at 35."""
+        """Combined altFINS bonus for scoring. Capped at 20 (was 35).
+        Day 2 finding: 35 pts overpowered technicals — tokens scored 84+
+        from bonus alone while price was falling. Reduced to keep altFINS
+        as enrichment, not the dominant signal."""
         total = (
             self.get_pattern_bonus(symbol) +
             self.get_oversold_uptrend_bonus(symbol) +
             self.get_crossover_bonus(symbol)
         )
-        return min(35.0, total)
+        return min(20.0, total)
 
     # ── Pre-execution lookups (async, for risk_agent) ────────────
 
