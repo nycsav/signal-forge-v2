@@ -39,7 +39,9 @@ Does this make sense? JSON: {{"agrees":true/false,"reason":"5 words max"}}"""
 class AIAnalystAgent:
     # Quantitative threshold — no LLM needed above this score
     QUANT_ENTRY_THRESHOLD = 75
-    ENTRY_COOLDOWN_MINUTES = 60  # don't re-enter same symbol within 60 min
+    BASE_COOLDOWN_MINUTES = 60
+    MIN_COOLDOWN_MINUTES = 15    # fastest we'll trade in a hot streak
+    MAX_COOLDOWN_MINUTES = 240   # slowest when losing
 
     def __init__(self, event_bus: EventBus, config: dict, scorer: SignalScorer, altfins=None):
         self.bus = event_bus
@@ -49,15 +51,53 @@ class AIAnalystAgent:
         self.primary_model = config.get("deepseek_model", "deepseek-r1:14b")
         self.fast_model = config.get("fast_model", "llama3.2:3b")
         self._last_entry: dict[str, datetime] = {}  # symbol → last entry time
+        self._recent_results: list[float] = []       # last N trade P&Ls for adaptive cooldown
+        self._current_cooldown = self.BASE_COOLDOWN_MINUTES
         self.bus.subscribe(SignalBundle, self._on_signal_bundle)
+
+    def record_trade_result(self, pnl_pct: float):
+        """Called by PerformanceAnalyzer or MonitorAgent after trade closes."""
+        self._recent_results.append(pnl_pct)
+        if len(self._recent_results) > 10:
+            self._recent_results = self._recent_results[-10:]
+        self._adapt_cooldown()
+
+    def _adapt_cooldown(self):
+        """Ramp up when winning, cool down when losing."""
+        if len(self._recent_results) < 3:
+            return
+
+        last_3 = self._recent_results[-3:]
+        wins = sum(1 for p in last_3 if p > 0)
+        losses = sum(1 for p in last_3 if p <= 0)
+        avg_pnl = sum(last_3) / len(last_3)
+
+        old = self._current_cooldown
+
+        if losses == 3:
+            # 3 losses in a row → slow down hard
+            self._current_cooldown = min(self.MAX_COOLDOWN_MINUTES, old * 2)
+            logger.warning(f"ADAPTIVE: 3 consecutive losses → cooldown {old}→{self._current_cooldown} min")
+        elif wins == 3:
+            # 3 wins in a row → ramp up
+            self._current_cooldown = max(self.MIN_COOLDOWN_MINUTES, old // 2)
+            logger.warning(f"ADAPTIVE: 3 consecutive wins → cooldown {old}→{self._current_cooldown} min")
+        elif avg_pnl < -0.3:
+            # Losing avg > 0.3% → slow down
+            self._current_cooldown = min(self.MAX_COOLDOWN_MINUTES, int(old * 1.5))
+            logger.info(f"ADAPTIVE: avg P&L {avg_pnl:+.2f}% → cooldown {old}→{self._current_cooldown} min")
+        elif avg_pnl > 0.1:
+            # Winning avg > 0.1% → speed up
+            self._current_cooldown = max(self.MIN_COOLDOWN_MINUTES, int(old * 0.75))
+            logger.info(f"ADAPTIVE: avg P&L {avg_pnl:+.2f}% → cooldown {old}→{self._current_cooldown} min")
 
     async def _on_signal_bundle(self, bundle: SignalBundle):
         symbol = bundle.symbol
 
-        # Cooldown: don't re-enter same symbol within 60 minutes
+        # Adaptive cooldown: slows down when losing, speeds up when winning
         last = self._last_entry.get(symbol)
-        if last and (datetime.now() - last).total_seconds() < self.ENTRY_COOLDOWN_MINUTES * 60:
-            return  # silently skip — too soon
+        if last and (datetime.now() - last).total_seconds() < self._current_cooldown * 60:
+            return  # too soon — cooldown active
         market = bundle.market_state
         tech = bundle.technical
         sent = bundle.sentiment

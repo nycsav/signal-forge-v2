@@ -87,6 +87,14 @@ class SignalForgeOrchestrator:
         self.bus.subscribe(SentimentEvent, self._on_sentiment)
         self.bus.subscribe(OnChainEvent, self._on_onchain)
 
+        # Feed trade results back to AI analyst for adaptive cooldown
+        from agents.events import TradeClosedEvent
+        self.bus.subscribe(TradeClosedEvent, self._on_trade_closed_feedback)
+
+    async def _on_trade_closed_feedback(self, event):
+        """Feed trade P&L back to AI analyst for adaptive cooldown."""
+        self.ai_analyst.record_trade_result(event.pnl_pct)
+
     async def _on_market_state(self, event: MarketStateEvent):
         self._market_states[event.symbol] = event
 
