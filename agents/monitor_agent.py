@@ -81,6 +81,14 @@ class MonitorAgent:
         if not positions:
             return
 
+        # KILL SWITCH: if total unrealized loss exceeds 3% of portfolio, close everything
+        total_upl = sum(float(p.get("unrealized_pl", 0)) for p in positions)
+        if total_upl < -3000:  # -$3,000 on $100K = 3%
+            logger.critical(f"KILL SWITCH: total unrealized P&L ${total_upl:,.2f} exceeds -$3,000 — closing ALL positions")
+            for pos in positions:
+                await self._close_position(pos, "kill_switch", float(pos.get("current", pos.get("current_price", 0))))
+            return
+
         # Fetch actual fill times from Alpaca orders (once per cycle)
         fill_times = await self._fetch_fill_times()
 

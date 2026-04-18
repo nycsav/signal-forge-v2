@@ -63,33 +63,48 @@ class AIAnalystAgent:
         self._adapt_cooldown()
 
     def _adapt_cooldown(self):
-        """Ramp up when winning, cool down when losing."""
+        """RL-inspired adaptive policy: adjust cooldown AND entry threshold
+        based on recent reward signal (trade P&L).
+
+        Reward function: R = sum(recent P&L) weighted by recency.
+        Policy: higher reward → lower cooldown + lower threshold (trade more)
+                lower reward → higher cooldown + higher threshold (trade less)
+        """
         if len(self._recent_results) < 3:
             return
+
+        # Exponential recency weighting (most recent trades matter more)
+        weights = [0.5 ** i for i in range(len(self._recent_results) - 1, -1, -1)]
+        total_w = sum(weights)
+        weighted_reward = sum(r * w for r, w in zip(self._recent_results, weights)) / total_w
 
         last_3 = self._recent_results[-3:]
         wins = sum(1 for p in last_3 if p > 0)
         losses = sum(1 for p in last_3 if p <= 0)
-        avg_pnl = sum(last_3) / len(last_3)
 
-        old = self._current_cooldown
+        old_cooldown = self._current_cooldown
+        old_threshold = self.QUANT_ENTRY_THRESHOLD
 
         if losses == 3:
-            # 3 losses in a row → slow down hard
-            self._current_cooldown = min(self.MAX_COOLDOWN_MINUTES, old * 2)
-            logger.warning(f"ADAPTIVE: 3 consecutive losses → cooldown {old}→{self._current_cooldown} min")
+            # 3 losses → defensive: double cooldown, raise threshold
+            self._current_cooldown = min(self.MAX_COOLDOWN_MINUTES, old_cooldown * 2)
+            self.QUANT_ENTRY_THRESHOLD = min(90, old_threshold + 3)
+            logger.warning(f"RL ADAPT: 3 losses → cooldown {old_cooldown}→{self._current_cooldown}min, threshold {old_threshold}→{self.QUANT_ENTRY_THRESHOLD}")
         elif wins == 3:
-            # 3 wins in a row → ramp up
-            self._current_cooldown = max(self.MIN_COOLDOWN_MINUTES, old // 2)
-            logger.warning(f"ADAPTIVE: 3 consecutive wins → cooldown {old}→{self._current_cooldown} min")
-        elif avg_pnl < -0.3:
-            # Losing avg > 0.3% → slow down
-            self._current_cooldown = min(self.MAX_COOLDOWN_MINUTES, int(old * 1.5))
-            logger.info(f"ADAPTIVE: avg P&L {avg_pnl:+.2f}% → cooldown {old}→{self._current_cooldown} min")
-        elif avg_pnl > 0.1:
-            # Winning avg > 0.1% → speed up
-            self._current_cooldown = max(self.MIN_COOLDOWN_MINUTES, int(old * 0.75))
-            logger.info(f"ADAPTIVE: avg P&L {avg_pnl:+.2f}% → cooldown {old}→{self._current_cooldown} min")
+            # 3 wins → aggressive: halve cooldown, lower threshold
+            self._current_cooldown = max(self.MIN_COOLDOWN_MINUTES, old_cooldown // 2)
+            self.QUANT_ENTRY_THRESHOLD = max(65, old_threshold - 3)
+            logger.warning(f"RL ADAPT: 3 wins → cooldown {old_cooldown}→{self._current_cooldown}min, threshold {old_threshold}→{self.QUANT_ENTRY_THRESHOLD}")
+        elif weighted_reward < -0.3:
+            # Losing trend → gradual tightening
+            self._current_cooldown = min(self.MAX_COOLDOWN_MINUTES, int(old_cooldown * 1.5))
+            self.QUANT_ENTRY_THRESHOLD = min(90, old_threshold + 1)
+            logger.info(f"RL ADAPT: reward={weighted_reward:+.2f}% → cooldown {old_cooldown}→{self._current_cooldown}min, threshold {old_threshold}→{self.QUANT_ENTRY_THRESHOLD}")
+        elif weighted_reward > 0.1:
+            # Winning trend → gradual loosening
+            self._current_cooldown = max(self.MIN_COOLDOWN_MINUTES, int(old_cooldown * 0.75))
+            self.QUANT_ENTRY_THRESHOLD = max(65, old_threshold - 1)
+            logger.info(f"RL ADAPT: reward={weighted_reward:+.2f}% → cooldown {old_cooldown}→{self._current_cooldown}min, threshold {old_threshold}→{self.QUANT_ENTRY_THRESHOLD}")
 
     async def _on_signal_bundle(self, bundle: SignalBundle):
         symbol = bundle.symbol
