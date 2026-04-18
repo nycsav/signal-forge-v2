@@ -195,7 +195,8 @@ class AIAnalystAgent:
             )
             logger.warning(f"QUANT ENTRY: {symbol} score={orchestrator_score:.0f} conf={confidence:.0%} — bypassing LLM, sending to RiskAgent")
             self._last_entry[symbol] = datetime.now()
-            await self.bus.publish(proposal)
+            from agents.event_bus import Priority
+            await self.bus.publish(proposal, priority=Priority.HIGH)
             return
 
         # ═══ Below 75: use LLM pipeline as before ═══

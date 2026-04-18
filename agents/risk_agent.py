@@ -125,7 +125,8 @@ class RiskAgent:
             f"Risk APPROVED: {proposal.symbol} {proposal.direction.value} "
             f"size=${size_usd:,.0f} ({size_pct:.1%})"
         )
-        await self.bus.publish(event)
+        from agents.event_bus import Priority
+        await self.bus.publish(event, priority=Priority.HIGH)
 
         # Log the approval
         self.repo.log_event("risk_agent", "approved", proposal.symbol, {
