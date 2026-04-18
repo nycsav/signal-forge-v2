@@ -53,13 +53,36 @@ class AIAnalystAgent:
         self._last_entry: dict[str, datetime] = {}  # symbol → last entry time
         self._recent_results: list[float] = []       # last N trade P&Ls for adaptive cooldown
         self._current_cooldown = self.BASE_COOLDOWN_MINUTES
+        self._symbol_pnl: dict[str, list[float]] = {}  # per-symbol P&L tracking
+        self._blocked_symbols: set[str] = set()         # symbols with 3+ consecutive losses
         self.bus.subscribe(SignalBundle, self._on_signal_bundle)
 
-    def record_trade_result(self, pnl_pct: float):
-        """Called by PerformanceAnalyzer or MonitorAgent after trade closes."""
+    def record_trade_result(self, pnl_pct: float, symbol: str = ""):
+        """Called after trade closes. Feeds both global and per-symbol adaptation."""
         self._recent_results.append(pnl_pct)
         if len(self._recent_results) > 10:
             self._recent_results = self._recent_results[-10:]
+
+        # Per-symbol tracking
+        if symbol:
+            if symbol not in self._symbol_pnl:
+                self._symbol_pnl[symbol] = []
+            self._symbol_pnl[symbol].append(pnl_pct)
+            if len(self._symbol_pnl[symbol]) > 10:
+                self._symbol_pnl[symbol] = self._symbol_pnl[symbol][-10:]
+
+            # Block symbol after 3 consecutive losses
+            last_3 = self._symbol_pnl[symbol][-3:]
+            if len(last_3) >= 3 and all(p <= 0 for p in last_3):
+                if symbol not in self._blocked_symbols:
+                    self._blocked_symbols.add(symbol)
+                    logger.warning(f"SYMBOL BLOCKED: {symbol} — 3 consecutive losses, pausing 2 hours")
+
+            # Unblock after a win
+            if pnl_pct > 0 and symbol in self._blocked_symbols:
+                self._blocked_symbols.discard(symbol)
+                logger.info(f"SYMBOL UNBLOCKED: {symbol} — profitable trade, resuming")
+
         self._adapt_cooldown()
 
     def _adapt_cooldown(self):
@@ -109,6 +132,10 @@ class AIAnalystAgent:
     async def _on_signal_bundle(self, bundle: SignalBundle):
         symbol = bundle.symbol
 
+        # Block symbols with 3+ consecutive losses
+        if symbol in self._blocked_symbols:
+            return
+
         # Adaptive cooldown: slows down when losing, speeds up when winning
         last = self._last_entry.get(symbol)
         if last and (datetime.now() - last).total_seconds() < self._current_cooldown * 60:
@@ -148,7 +175,7 @@ class AIAnalystAgent:
         if orchestrator_score >= self.QUANT_ENTRY_THRESHOLD:
             entry = market.price
             atr = entry * tech.atr_14_pct if tech.atr_14_pct > 0 else entry * 0.03
-            risk = atr * 2.0
+            risk = atr * 2.5  # matched to MonitorAgent (widened from 2.0 — too many hard stops)
             confidence = min(0.95, orchestrator_score / 100)
 
             proposal = TradeProposal(

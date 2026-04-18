@@ -27,7 +27,7 @@ class MonitorAgent:
     # Exit parameters — tuned 2026-04-16 to fix win/loss asymmetry
     # Old: 2.5x stop, 1.5R TP1 → net negative (stop too wide, TP1 too tight)
     # New: 2.0x stop, 2R/4R/6R TPs → positive expectancy at 44%+ win rate
-    ATR_STOP_MULT = 2.0
+    ATR_STOP_MULT = 2.5  # widened from 2.0 — live wicks exceed 2x ATR, 7/12 trades hit hard stop
     ATR_ACTIVATION_MULT = 1.0   # activate trailing sooner (was 1.5)
     TP1_R = 2.0   # TP1 at 2× risk (was 1.5)
     TP2_R = 4.0   # TP2 at 4× risk (was 3.0)
