@@ -37,6 +37,10 @@ Does this make sense? JSON: {{"agrees":true/false,"reason":"5 words max"}}"""
 
 
 class AIAnalystAgent:
+    # Quantitative threshold — no LLM needed above this score
+    QUANT_ENTRY_THRESHOLD = 75
+    ENTRY_COOLDOWN_MINUTES = 60  # don't re-enter same symbol within 60 min
+
     def __init__(self, event_bus: EventBus, config: dict, scorer: SignalScorer, altfins=None):
         self.bus = event_bus
         self.scorer = scorer
@@ -44,13 +48,16 @@ class AIAnalystAgent:
         self.ollama_host = config.get("ollama_host", "http://localhost:11434")
         self.primary_model = config.get("deepseek_model", "deepseek-r1:14b")
         self.fast_model = config.get("fast_model", "llama3.2:3b")
+        self._last_entry: dict[str, datetime] = {}  # symbol → last entry time
         self.bus.subscribe(SignalBundle, self._on_signal_bundle)
-
-    # Quantitative threshold — no LLM needed above this score
-    QUANT_ENTRY_THRESHOLD = 75
 
     async def _on_signal_bundle(self, bundle: SignalBundle):
         symbol = bundle.symbol
+
+        # Cooldown: don't re-enter same symbol within 60 minutes
+        last = self._last_entry.get(symbol)
+        if last and (datetime.now() - last).total_seconds() < self.ENTRY_COOLDOWN_MINUTES * 60:
+            return  # silently skip — too soon
         market = bundle.market_state
         tech = bundle.technical
         sent = bundle.sentiment
@@ -105,6 +112,7 @@ class AIAnalystAgent:
                 score_breakdown=breakdown,
             )
             logger.warning(f"QUANT ENTRY: {symbol} score={orchestrator_score:.0f} conf={confidence:.0%} — bypassing LLM, sending to RiskAgent")
+            self._last_entry[symbol] = datetime.now()
             await self.bus.publish(proposal)
             return
 
