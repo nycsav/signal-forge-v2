@@ -28,7 +28,7 @@ class MonitorAgent:
     # Old: 2.5x stop, 1.5R TP1 → net negative (stop too wide, TP1 too tight)
     # New: 2.0x stop, 2R/4R/6R TPs → positive expectancy at 44%+ win rate
     ATR_STOP_MULT = 2.5  # widened from 2.0 — live wicks exceed 2x ATR, 7/12 trades hit hard stop
-    ATR_ACTIVATION_MULT = 1.0   # activate trailing sooner (was 1.5)
+    ATR_ACTIVATION_MULT = 0.75  # activate trailing early — S/R entries have tighter stops, trail sooner
     TP1_R = 2.0   # TP1 at 2× risk (was 1.5)
     TP2_R = 4.0   # TP2 at 4× risk (was 3.0)
     TP3_R = 6.0   # TP3 at 6× risk (was 5.0)
@@ -166,15 +166,51 @@ class MonitorAgent:
                     volumes = volumes[-50:]
                 state["volumes"] = volumes
 
-            risk = atr * self.ATR_STOP_MULT
-            stop = entry - risk
+            # Use proposal's stop/TP levels if available in position_state DB.
+            # S/R strategy sets stop below support level (tighter than ATR-based).
+            # Fall back to ATR-based if DB levels not found.
+            db_stop = state.get("db_stop_price", 0)
+            db_tp1 = state.get("db_tp1_price", 0)
+            db_tp2 = state.get("db_tp2_price", 0)
+            db_tp3 = state.get("db_tp3_price", 0)
 
-            # (B) Activation: don't trail until profit >= 1.5 × ATR(14)
+            # Load from DB once per position lifecycle
+            if db_stop == 0 and "db_loaded" not in state:
+                try:
+                    import sqlite3 as _sql
+                    from config.settings import settings as _s
+                    _conn = _sql.connect(str(_s.database_path), timeout=3)
+                    _conn.row_factory = _sql.Row
+                    _row = _conn.execute(
+                        "SELECT stop_price, tp1_price, tp2_price, tp3_price FROM position_state WHERE symbol=?",
+                        (symbol,)
+                    ).fetchone()
+                    _conn.close()
+                    if _row:
+                        db_stop = _row["stop_price"] or 0
+                        db_tp1 = _row["tp1_price"] or 0
+                        db_tp2 = _row["tp2_price"] or 0
+                        db_tp3 = _row["tp3_price"] or 0
+                        state["db_stop_price"] = db_stop
+                        state["db_tp1_price"] = db_tp1
+                        state["db_tp2_price"] = db_tp2
+                        state["db_tp3_price"] = db_tp3
+                except Exception:
+                    pass
+                state["db_loaded"] = True
+
+            risk = atr * self.ATR_STOP_MULT
+            stop = db_stop if db_stop > 0 else (entry - risk)
+
+            # (B) Activation: don't trail until profit >= 1.0 × ATR(14)
             activation = entry + atr * self.ATR_ACTIVATION_MULT
 
-            tp1 = entry + risk * self.TP1_R
-            tp2 = entry + risk * self.TP2_R
-            tp3 = entry + risk * self.TP3_R
+            tp1 = db_tp1 if db_tp1 > 0 else (entry + risk * self.TP1_R)
+            tp2 = db_tp2 if db_tp2 > 0 else (entry + risk * self.TP2_R)
+            tp3 = db_tp3 if db_tp3 > 0 else (entry + risk * self.TP3_R)
+
+            # Recalculate risk from actual stop for trailing purposes
+            risk = entry - stop if stop > 0 else risk
 
             pnl_pct = (current - entry) / entry
             hold_hours = (datetime.now() - state["first_seen"]).total_seconds() / 3600
