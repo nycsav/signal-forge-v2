@@ -22,9 +22,9 @@ class SRStrategy:
     """Support/Resistance mean-reversion entry strategy."""
 
     LOOKBACK_BARS = 48        # 48 hourly candles = 2 days for pivot detection
-    PROXIMITY_PCT = 1.5       # price must be within 1.5% of support
+    PROXIMITY_PCT = 2.0       # widened from 1.5% — catch more bounces
     MIN_BOUNCES = 2           # level tested at least twice
-    COOLDOWN_MINUTES = 120    # don't re-enter same symbol within 2 hours
+    COOLDOWN_MINUTES = 60     # reduced from 120 — S/R is our best strategy, trade more
 
     def __init__(self, event_bus: EventBus):
         self.bus = event_bus
@@ -64,31 +64,50 @@ class SRStrategy:
 
             # Price must be ABOVE support (bouncing) and within proximity
             if 0 < distance_pct <= self.PROXIMITY_PCT:
-                # Confirm bounce: RSI should be recovering (> 30) and BB position rising
+                # Confirm bounce: RSI recovering, not deeply oversold and falling
                 if tech.rsi_14 < 25:
                     continue  # still falling, not bouncing yet
 
                 if tech.bb_position < 0.1:
                     continue  # still at bottom of bands
 
-                # Volume confirmation: need above-average volume on the bounce
-                if tech.volume_ratio < 1.0:
-                    continue  # thin volume bounce = weak
+                # Volume confirmation: above-average volume on the bounce
+                if tech.volume_ratio < 0.8:
+                    continue  # thin volume bounce = weak (loosened from 1.0)
 
                 # Entry signal: price near support + bouncing + volume
                 atr = price * tech.atr_14_pct if tech.atr_14_pct > 0 else price * 0.03
-                risk = atr * 2.5
+
+                # Stop below support level (not ATR-based) — since we enter AT support,
+                # the stop should be just below where buyers defend.
+                # Use 0.5% below support or 1x ATR below support, whichever is tighter.
+                stop_below_support = support * 0.995  # 0.5% below support
+                stop_atr = support - atr              # 1x ATR below support
+                stop_price = max(stop_below_support, stop_atr)  # tighter of the two
+
+                risk = price - stop_price  # risk = distance from entry to stop
+                if risk <= 0:
+                    continue
+
+                # Score based on confluence: more volume + closer to support = higher score
+                base_score = 70
+                if tech.volume_ratio > 1.5:
+                    base_score += 5
+                if distance_pct < 0.5:
+                    base_score += 5  # very close to support = higher conviction
+                if tech.rsi_14 > 40 and tech.rsi_14 < 60:
+                    base_score += 3  # RSI in neutral zone = healthier bounce
 
                 proposal = TradeProposal(
                     timestamp=datetime.now(),
                     proposal_id=str(uuid.uuid4()),
                     symbol=symbol,
                     direction=Direction.LONG,
-                    raw_score=70.0,  # S/R entries get a fixed score
-                    ai_confidence=0.70,
+                    raw_score=min(90, base_score),
+                    ai_confidence=min(0.85, 0.65 + tech.volume_ratio * 0.05),
                     ai_rationale=f"S/R REVERSAL: {symbol} bouncing off support ${support:.2f} (dist={distance_pct:.1f}%, RSI={tech.rsi_14:.0f}, vol={tech.volume_ratio:.1f}x)",
                     suggested_entry=price,
-                    suggested_stop=support - (atr * 0.5),  # stop just below support
+                    suggested_stop=stop_price,
                     suggested_tp1=price + risk * 2.0,
                     suggested_tp2=price + risk * 4.0,
                     suggested_tp3=price + risk * 6.0,

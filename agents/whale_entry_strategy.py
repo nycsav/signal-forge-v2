@@ -22,8 +22,8 @@ class WhaleEntryStrategy:
     """Enter trades triggered by whale accumulation events."""
 
     MIN_STRENGTH = 3           # whale event strength (1-5 scale)
-    MIN_USD_VALUE = 1_000_000  # minimum whale transaction size
-    COOLDOWN_MINUTES = 180     # 3 hours between entries per symbol
+    MIN_USD_VALUE = 500_000    # lowered from $1M — catch more accumulation
+    COOLDOWN_MINUTES = 120     # reduced from 180 — act faster on whale signals
     TRADE_SIZE_USD = 1000      # $1K per whale-triggered trade
 
     def __init__(self, event_bus: EventBus):
@@ -127,10 +127,9 @@ class WhaleEntryStrategy:
 
     def _map_to_symbol(self, token: str, signal: dict) -> str:
         """Map whale event token name to Alpaca-tradeable symbol."""
-        # Common mappings
         token_map = {
-            "BTC": "BTC-USD", "BITCOIN": "BTC-USD",
-            "ETH": "ETH-USD", "ETHEREUM": "ETH-USD", "ETHER": "ETH-USD",
+            "BTC": "BTC-USD", "BITCOIN": "BTC-USD", "WRAPPED BTC": "BTC-USD", "WBTC": "BTC-USD",
+            "ETH": "ETH-USD", "ETHEREUM": "ETH-USD", "ETHER": "ETH-USD", "WETH": "ETH-USD",
             "SOL": "SOL-USD", "SOLANA": "SOL-USD",
             "DOGE": "DOGE-USD", "DOGECOIN": "DOGE-USD",
             "LINK": "LINK-USD", "CHAINLINK": "LINK-USD",
@@ -138,29 +137,43 @@ class WhaleEntryStrategy:
             "AVAX": "AVAX-USD", "AVALANCHE": "AVAX-USD",
             "DOT": "DOT-USD", "POLKADOT": "DOT-USD",
             "XRP": "XRP-USD", "RIPPLE": "XRP-USD",
-            "USDC": None, "USDT": None, "USD COIN": None,  # stablecoins — don't trade
+            "UNI": "UNI-USD", "UNISWAP": "UNI-USD",
+            "AAVE": "AAVE-USD",
+            "LTC": "LTC-USD", "LITECOIN": "LTC-USD",
+            "NEAR": "NEAR-USD",
+            "ARB": "ARB-USD", "ARBITRUM": "ARB-USD",
+            "OP": "OP-USD", "OPTIMISM": "OP-USD",
+            "USDC": None, "USDT": None, "USD COIN": None, "TETHER": None,
+            "DAI": None, "BUSD": None,  # stablecoins — don't trade
         }
 
         # Try direct token name
-        if token in token_map:
-            return token_map[token]
+        token_upper = (token or "").upper().strip()
+        if token_upper in token_map:
+            return token_map[token_upper]
 
-        # Try from reason text
+        # Try from reason text — search for any known token name
         reason = signal.get("reason", "").upper()
         for name, sym in token_map.items():
             if name in reason and sym:
                 return sym
 
-        # Try from_entity / to_entity
-        from_entity = signal.get("from_entity", "").upper()
-        to_entity = signal.get("to_entity", "").upper()
+        # Try chain field — if it's "bitcoin" chain, the withdrawal is BTC
+        chain = signal.get("chain", "").upper()
+        chain_to_symbol = {
+            "BITCOIN": "BTC-USD", "ETHEREUM": "ETH-USD",
+            "SOLANA": "SOL-USD", "AVALANCHE": "AVAX-USD",
+            "ARBITRUM": "ARB-USD", "OPTIMISM": "OP-USD",
+            "POLYGON": "MATIC-USD", "CARDANO": "ADA-USD",
+        }
+        if chain in chain_to_symbol:
+            return chain_to_symbol[chain]
 
-        # If withdrawn from exchange → accumulation signal for that token
-        if "COINBASE" in from_entity or "BINANCE" in from_entity or "BYBIT" in from_entity:
-            # This is a withdrawal — the token field might help
-            if token and token + "-USD" in token_map.values():
-                return token + "-USD"
+        # Large stablecoin mint/deposit → bullish for BTC (capital entering market)
+        if any(s in reason for s in ["USD COIN MINTED", "USDC MINTED", "USDT MINTED", "TETHER MINTED"]):
+            return "BTC-USD"  # new capital → buy BTC as proxy
 
+        # Exchange withdrawal without specific token → skip (too ambiguous)
         return None
 
     @property

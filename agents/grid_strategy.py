@@ -21,10 +21,10 @@ from agents.events import TradeProposal, Direction
 class GridStrategy:
     """Grid trading for ranging markets — buy low, sell high, repeat."""
 
-    GRID_LEVELS = 5           # number of buy levels below current price
-    GRID_SPACING_PCT = 1.0    # 1% between each grid level
+    GRID_LEVELS = 3           # reduced from 5 — fewer levels, faster cycling
+    GRID_SPACING_PCT = 0.75   # tighter from 1.0 — more frequent fills in ranging market
     SIZE_PER_LEVEL = 500      # $500 per grid level
-    COOLDOWN_MINUTES = 60     # min time between grid entries
+    COOLDOWN_MINUTES = 30     # reduced from 60 — grids should cycle fast
 
     def __init__(self, event_bus: EventBus):
         self.bus = event_bus
