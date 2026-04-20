@@ -30,6 +30,9 @@ from agents.whale_trigger import WhaleTrigger
 from agents.chart_pattern_agent import ChartPatternAgent
 from agents.altfins_enrichment import AltFINSEnrichment
 from agents.scoring import SignalScorer
+from agents.sr_strategy import SRStrategy
+from agents.whale_entry_strategy import WhaleEntryStrategy
+from agents.grid_strategy import GridStrategy
 from db.repository import Repository
 from dashboard.app import app as dashboard_app
 
@@ -70,8 +73,11 @@ class SignalForgeOrchestrator:
         self.whale_trigger = WhaleTrigger(event_bus=self.bus, on_signal=self._on_whale_signal)
         self.chart_patterns = ChartPatternAgent(self.bus)
         self.regime = RegimeAdaptiveEngine(settings.database_path)
-        # Unstable features disabled during stabilization (2026-04-17):
-        # PerformanceAnalyzer, AgentRanking, LayeredMemory — will re-add after paper validation
+
+        # New entry strategies (added 2026-04-19 after Day 3 review)
+        self.sr_strategy = SRStrategy(self.bus)           # S/R mean reversion
+        self.whale_strategy = WhaleEntryStrategy(self.bus) # Whale-triggered entries
+        self.grid_strategy = GridStrategy(self.bus)        # Grid trading for ranging
 
         # Orchestrator state for bundle assembly
         self._market_states: dict = {}
@@ -97,6 +103,13 @@ class SignalForgeOrchestrator:
 
     async def _on_market_state(self, event: MarketStateEvent):
         self._market_states[event.symbol] = event
+
+        # Feed price to whale strategy (check pending whale entries)
+        atr_pct = event.atr_14 / event.price if event.price > 0 and event.atr_14 > 0 else 0.03
+        await self.whale_strategy.check_and_enter(event.symbol, event.price, atr_pct)
+
+        # Feed price to grid strategy (check grid levels)
+        await self.grid_strategy.check_grid(event.symbol, event.price, atr_pct)
 
         # Update regime engine with latest market state
         perf = self.repo.get_performance_stats(7)
@@ -139,6 +152,9 @@ class SignalForgeOrchestrator:
 
         logger.warning(f"WHALE TRIGGER: {direction.upper()} (strength {strength}/5) — {reason}")
         logger.info("Triggering immediate market scan...")
+
+        # Feed whale signal to whale entry strategy
+        self.whale_strategy.on_whale_signal(signal)
 
         # Force an immediate scan cycle
         try:
