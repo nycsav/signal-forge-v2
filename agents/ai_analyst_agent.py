@@ -158,12 +158,14 @@ class AIAnalystAgent:
             import sqlite3
             from config.settings import settings as _s
             conn = sqlite3.connect(str(_s.database_path), timeout=3)
-            row = conn.execute(
-                "SELECT raw_score FROM signals_log WHERE symbol=? ORDER BY id DESC LIMIT 1", (symbol,)
-            ).fetchone()
-            conn.close()
-            if row and row[0] and row[0] > pre_score:
-                orchestrator_score = row[0]
+            try:
+                row = conn.execute(
+                    "SELECT raw_score FROM signals_log WHERE symbol=? ORDER BY id DESC LIMIT 1", (symbol,)
+                ).fetchone()
+                if row and row[0] and row[0] > pre_score:
+                    orchestrator_score = row[0]
+            finally:
+                conn.close()
         except Exception:
             pass
 

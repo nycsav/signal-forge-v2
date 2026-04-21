@@ -68,30 +68,31 @@ def log_trade_outcome(
 ):
     """Record a trade outcome with full context for learning."""
     conn = _get_db()
+    try:
+        # Auto-generate lesson
+        lesson = _generate_lesson(
+            pnl_pct, exit_reason, market_change_pct, fear_greed,
+            ai_confidence, consensus, hold_minutes
+        )
 
-    # Auto-generate lesson
-    lesson = _generate_lesson(
-        pnl_pct, exit_reason, market_change_pct, fear_greed,
-        ai_confidence, consensus, hold_minutes
-    )
-
-    conn.execute("""
-        INSERT INTO trade_outcomes (
+        conn.execute("""
+            INSERT INTO trade_outcomes (
+                symbol, direction, entry_price, exit_price, entry_time, exit_time,
+                pnl_pct, pnl_usd, hold_minutes, exit_reason,
+                fear_greed, market_change_pct, regime, rsi, ai_confidence, ai_direction,
+                consensus, fib_level, arkham_signal, cmc_volume_spike,
+                was_profitable, lesson
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (
             symbol, direction, entry_price, exit_price, entry_time, exit_time,
             pnl_pct, pnl_usd, hold_minutes, exit_reason,
             fear_greed, market_change_pct, regime, rsi, ai_confidence, ai_direction,
-            consensus, fib_level, arkham_signal, cmc_volume_spike,
-            was_profitable, lesson
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-    """, (
-        symbol, direction, entry_price, exit_price, entry_time, exit_time,
-        pnl_pct, pnl_usd, hold_minutes, exit_reason,
-        fear_greed, market_change_pct, regime, rsi, ai_confidence, ai_direction,
-        1 if consensus else 0, fib_level, arkham_signal, 1 if cmc_volume_spike else 0,
-        1 if pnl_pct > 0 else 0, lesson,
-    ))
-    conn.commit()
-    conn.close()
+            1 if consensus else 0, fib_level, arkham_signal, 1 if cmc_volume_spike else 0,
+            1 if pnl_pct > 0 else 0, lesson,
+        ))
+        conn.commit()
+    finally:
+        conn.close()
 
     logger.info(f"TRADE LOG: {symbol} {direction} P&L={pnl_pct:+.2f}% (${pnl_usd:+.2f}) reason={exit_reason} | {lesson}")
 
@@ -122,46 +123,50 @@ def _generate_lesson(pnl_pct, exit_reason, market_change, fg, confidence, consen
 
 def get_recent_outcomes(limit: int = 50) -> list[dict]:
     conn = _get_db()
-    rows = conn.execute("SELECT * FROM trade_outcomes ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    try:
+        rows = conn.execute("SELECT * FROM trade_outcomes ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def get_win_rate_by_signal() -> dict:
     """Analyze which signals produce winning trades."""
     conn = _get_db()
-    results = {}
+    try:
+        results = {}
 
-    # By consensus
-    for consensus_val, label in [(1, "consensus"), (0, "no_consensus")]:
-        row = conn.execute("""
-            SELECT COUNT(*) as total, SUM(was_profitable) as wins
-            FROM trade_outcomes WHERE consensus=?
-        """, (consensus_val,)).fetchone()
-        if row and row["total"] > 0:
-            results[label] = {"total": row["total"], "wins": row["wins"] or 0,
-                              "win_rate": (row["wins"] or 0) / row["total"] * 100}
+        # By consensus
+        for consensus_val, label in [(1, "consensus"), (0, "no_consensus")]:
+            row = conn.execute("""
+                SELECT COUNT(*) as total, SUM(was_profitable) as wins
+                FROM trade_outcomes WHERE consensus=?
+            """, (consensus_val,)).fetchone()
+            if row and row["total"] > 0:
+                results[label] = {"total": row["total"], "wins": row["wins"] or 0,
+                                  "win_rate": (row["wins"] or 0) / row["total"] * 100}
 
-    # By regime
-    for regime in ["bull_trend", "bear_trend", "ranging"]:
-        row = conn.execute("""
-            SELECT COUNT(*) as total, SUM(was_profitable) as wins
-            FROM trade_outcomes WHERE regime=?
-        """, (regime,)).fetchone()
-        if row and row["total"] > 0:
-            results[f"regime_{regime}"] = {"total": row["total"], "wins": row["wins"] or 0,
-                                           "win_rate": (row["wins"] or 0) / row["total"] * 100}
+        # By regime
+        for regime in ["bull_trend", "bear_trend", "ranging"]:
+            row = conn.execute("""
+                SELECT COUNT(*) as total, SUM(was_profitable) as wins
+                FROM trade_outcomes WHERE regime=?
+            """, (regime,)).fetchone()
+            if row and row["total"] > 0:
+                results[f"regime_{regime}"] = {"total": row["total"], "wins": row["wins"] or 0,
+                                               "win_rate": (row["wins"] or 0) / row["total"] * 100}
 
-    # By exit reason
-    rows = conn.execute("""
-        SELECT exit_reason, COUNT(*) as total, SUM(was_profitable) as wins, AVG(pnl_pct) as avg_pnl
-        FROM trade_outcomes GROUP BY exit_reason
-    """).fetchall()
-    for r in rows:
-        results[f"exit_{r['exit_reason']}"] = {
-            "total": r["total"], "wins": r["wins"] or 0,
-            "avg_pnl": r["avg_pnl"] or 0,
-        }
+        # By exit reason
+        rows = conn.execute("""
+            SELECT exit_reason, COUNT(*) as total, SUM(was_profitable) as wins, AVG(pnl_pct) as avg_pnl
+            FROM trade_outcomes GROUP BY exit_reason
+        """).fetchall()
+        for r in rows:
+            results[f"exit_{r['exit_reason']}"] = {
+                "total": r["total"], "wins": r["wins"] or 0,
+                "avg_pnl": r["avg_pnl"] or 0,
+            }
 
-    conn.close()
-    return results
+        return results
+    finally:
+        conn.close()

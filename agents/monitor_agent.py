@@ -180,21 +180,23 @@ class MonitorAgent:
                     import sqlite3 as _sql
                     from config.settings import settings as _s
                     _conn = _sql.connect(str(_s.database_path), timeout=3)
-                    _conn.row_factory = _sql.Row
-                    _row = _conn.execute(
-                        "SELECT stop_price, tp1_price, tp2_price, tp3_price FROM position_state WHERE symbol=?",
-                        (symbol,)
-                    ).fetchone()
-                    _conn.close()
-                    if _row:
-                        db_stop = _row["stop_price"] or 0
-                        db_tp1 = _row["tp1_price"] or 0
-                        db_tp2 = _row["tp2_price"] or 0
-                        db_tp3 = _row["tp3_price"] or 0
-                        state["db_stop_price"] = db_stop
-                        state["db_tp1_price"] = db_tp1
-                        state["db_tp2_price"] = db_tp2
-                        state["db_tp3_price"] = db_tp3
+                    try:
+                        _conn.row_factory = _sql.Row
+                        _row = _conn.execute(
+                            "SELECT stop_price, tp1_price, tp2_price, tp3_price FROM position_state WHERE symbol=?",
+                            (symbol,)
+                        ).fetchone()
+                        if _row:
+                            db_stop = _row["stop_price"] or 0
+                            db_tp1 = _row["tp1_price"] or 0
+                            db_tp2 = _row["tp2_price"] or 0
+                            db_tp3 = _row["tp3_price"] or 0
+                            state["db_stop_price"] = db_stop
+                            state["db_tp1_price"] = db_tp1
+                            state["db_tp2_price"] = db_tp2
+                            state["db_tp3_price"] = db_tp3
+                    finally:
+                        _conn.close()
                 except Exception:
                     pass
                 state["db_loaded"] = True

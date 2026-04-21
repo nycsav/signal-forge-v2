@@ -36,40 +36,48 @@ def _get_db():
 
 def add_entry(date: str, category: str, title: str, detail: str = "", impact: str = "neutral"):
     conn = _get_db()
-    conn.execute(
-        "INSERT INTO daily_journal (date, category, title, detail, impact) VALUES (?,?,?,?,?)",
-        (date, category, title, detail, impact),
-    )
-    conn.commit()
-    conn.close()
+    try:
+        conn.execute(
+            "INSERT INTO daily_journal (date, category, title, detail, impact) VALUES (?,?,?,?,?)",
+            (date, category, title, detail, impact),
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def get_entries(date: str = None, limit: int = 100) -> list[dict]:
     conn = _get_db()
-    if date:
-        rows = conn.execute(
-            "SELECT * FROM daily_journal WHERE date=? ORDER BY id DESC LIMIT ?", (date, limit)
-        ).fetchall()
-    else:
-        rows = conn.execute(
-            "SELECT * FROM daily_journal ORDER BY date DESC, id DESC LIMIT ?", (limit,)
-        ).fetchall()
-    conn.close()
-    return [dict(r) for r in rows]
+    try:
+        if date:
+            rows = conn.execute(
+                "SELECT * FROM daily_journal WHERE date=? ORDER BY id DESC LIMIT ?", (date, limit)
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM daily_journal ORDER BY date DESC, id DESC LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def get_all_dates() -> list[str]:
     conn = _get_db()
-    rows = conn.execute("SELECT DISTINCT date FROM daily_journal ORDER BY date DESC").fetchall()
-    conn.close()
-    return [r["date"] for r in rows]
+    try:
+        rows = conn.execute("SELECT DISTINCT date FROM daily_journal ORDER BY date DESC").fetchall()
+        return [r["date"] for r in rows]
+    finally:
+        conn.close()
 
 
 def seed_history():
     """Seed the journal with the full history of what was built."""
     conn = _get_db()
-    existing = conn.execute("SELECT COUNT(*) as cnt FROM daily_journal").fetchone()["cnt"]
-    conn.close()
+    try:
+        existing = conn.execute("SELECT COUNT(*) as cnt FROM daily_journal").fetchone()["cnt"]
+    finally:
+        conn.close()
     if existing > 0:
         return  # Already seeded
 
@@ -113,13 +121,15 @@ def seed_history():
     ]
 
     conn = _get_db()
-    for date, cat, title, detail, impact in entries:
-        conn.execute(
-            "INSERT INTO daily_journal (date, category, title, detail, impact) VALUES (?,?,?,?,?)",
-            (date, cat, title, detail, impact),
-        )
-    conn.commit()
-    conn.close()
+    try:
+        for date, cat, title, detail, impact in entries:
+            conn.execute(
+                "INSERT INTO daily_journal (date, category, title, detail, impact) VALUES (?,?,?,?,?)",
+                (date, cat, title, detail, impact),
+            )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 # Auto-seed on import
