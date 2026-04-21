@@ -24,7 +24,7 @@ class SRStrategy:
     LOOKBACK_BARS = 48        # 48 hourly candles = 2 days for pivot detection
     PROXIMITY_PCT = 2.0       # widened from 1.5% — catch more bounces
     MIN_BOUNCES = 2           # level tested at least twice
-    COOLDOWN_MINUTES = 60     # reduced from 120 — S/R is our best strategy, trade more
+    COOLDOWN_MINUTES = 120    # widened back from 60 — hourly losses exceeding $100 threshold
 
     def __init__(self, event_bus: EventBus):
         self.bus = event_bus
