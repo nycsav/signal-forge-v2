@@ -27,8 +27,9 @@ class MonitorAgent:
     # Exit parameters — tuned 2026-04-16 to fix win/loss asymmetry
     # Old: 2.5x stop, 1.5R TP1 → net negative (stop too wide, TP1 too tight)
     # New: 2.0x stop, 2R/4R/6R TPs → positive expectancy at 44%+ win rate
-    ATR_STOP_MULT = 2.5  # widened from 2.0 — live wicks exceed 2x ATR, 7/12 trades hit hard stop
+    ATR_STOP_MULT = 2.0  # tightened from 2.5 — hard stop losses were 2.4x bigger than wins
     ATR_ACTIVATION_MULT = 0.75  # activate trailing early — S/R entries have tighter stops, trail sooner
+    MAX_LOSS_PER_TRADE_USD = 15.0  # absolute dollar cap — FIL/PEPE were losing $30-40 per trade
     TP1_R = 2.0   # TP1 at 2× risk (was 1.5)
     TP2_R = 4.0   # TP2 at 4× risk (was 3.0)
     TP3_R = 6.0   # TP3 at 6× risk (was 5.0)
@@ -219,6 +220,15 @@ class MonitorAgent:
 
             # (D) Regime-calibrated alpha — from regime engine state
             regime_alpha = self._get_regime_alpha()
+
+            # ── Layer 0: Absolute Dollar Cap ──
+            qty = float(pos.get("qty", 0) if isinstance(pos, dict) else pos.qty)
+            upl_usd = (current - entry) * qty
+            if upl_usd < -self.MAX_LOSS_PER_TRADE_USD:
+                logger.warning(f"Monitor DOLLAR CAP: {symbol} loss ${upl_usd:.2f} exceeds -${self.MAX_LOSS_PER_TRADE_USD}")
+                await self._close_position(pos, "hard_stop", current)
+                actions_taken += 1
+                continue
 
             # ── Layer 1: Hard Stop (with volume confirmation gate) ──
             if current <= stop:
