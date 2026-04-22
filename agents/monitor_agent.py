@@ -70,12 +70,30 @@ class MonitorAgent:
         logger.info(f"Monitor: tracking order {event.order_id} filled @ ${event.filled_price:,.2f}")
 
     async def run_monitor_loop(self, interval_seconds: int = 300):
+        self._loop_count = 0
         while True:
             try:
                 await self._evaluate_all()
+                self._loop_count += 1
+                # Every 30 cycles (~2.5 hours), check fd health
+                if self._loop_count % 30 == 0:
+                    self._check_fd_health()
             except Exception as e:
                 logger.error(f"Monitor loop error: {e}")
             await asyncio.sleep(interval_seconds)
+
+    def _check_fd_health(self):
+        """Check file descriptor count — warn if approaching limit."""
+        try:
+            import os
+            pid = os.getpid()
+            fd_count = len(os.listdir(f"/dev/fd"))
+            if fd_count > 4000:
+                logger.warning(f"FD HEALTH: {fd_count} open file descriptors — approaching limit")
+            elif fd_count > 2000:
+                logger.info(f"FD HEALTH: {fd_count} open file descriptors — elevated")
+        except Exception:
+            pass
 
     async def _evaluate_all(self):
         positions = await self._fetch_alpaca_positions()
