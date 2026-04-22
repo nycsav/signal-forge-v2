@@ -1,35 +1,35 @@
 {
   "components": {
     "technical": {
-      "weight": 0.35,
+      "weight": 0.168,
       "sub_weights": {
-        "rsi": 0.20,
+        "rsi": 0.2,
         "macd": 0.15,
         "bollinger": 0.15,
         "ema_alignment": 0.15,
         "volume": 0.15,
-        "ichimoku": 0.10,
-        "timeframe_consensus": 0.10
+        "ichimoku": 0.1,
+        "timeframe_consensus": 0.1
       }
     },
     "sentiment": {
-      "weight": 0.15,
+      "weight": 0.277,
       "sub_weights": {
-        "fear_greed": 0.40,
+        "fear_greed": 0.4,
         "sonar_sentiment": 0.35,
         "social_volume": 0.25
       }
     },
     "on_chain": {
-      "weight": 0.10,
+      "weight": 0.277,
       "sub_weights": {
-        "whale_flow": 0.40,
-        "exchange_flow": 0.30,
-        "smart_money": 0.30
+        "whale_flow": 0.4,
+        "exchange_flow": 0.3,
+        "smart_money": 0.3
       }
     },
     "ai_analyst": {
-      "weight": 0.40
+      "weight": 0.277
     }
   },
   "thresholds": {
