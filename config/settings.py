@@ -45,24 +45,13 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
 
     # Trading parameters
-    min_signal_score: float = 55.0
-    scan_interval_seconds: int = 300   # 5 min scan (was 15 min)
-    monitor_interval_seconds: int = 120  # 2 min exit checks (was 5 min)
+    min_signal_score: float = 62.0  # aligned with RiskAgent MIN_SIGNAL_SCORE_FLOOR
+    scan_interval_seconds: int = 600   # 10 min — gives 70s LLM pipeline room, reduces overtrading
+    monitor_interval_seconds: int = 120  # 2 min exit checks
     max_open_positions: int = 5
 
-    # Watchlist — Top 50 by market cap
-    watchlist: list[str] = [
-        "BTC-USD", "ETH-USD", "SOL-USD", "XRP-USD", "BNB-USD",
-        "ADA-USD", "AVAX-USD", "DOGE-USD", "DOT-USD", "LINK-USD",
-        "UNI-USD", "ATOM-USD", "LTC-USD", "NEAR-USD", "APT-USD",
-        "ARB-USD", "OP-USD", "FIL-USD", "INJ-USD", "SUI-USD",
-        "MATIC-USD", "AAVE-USD", "RENDER-USD", "FET-USD", "TIA-USD",
-        "SEI-USD", "STX-USD", "IMX-USD", "PEPE-USD", "WIF-USD",
-        "BONK-USD", "FLOKI-USD", "SHIB-USD", "TRX-USD", "XLM-USD",
-        "HBAR-USD", "VET-USD", "ALGO-USD", "ICP-USD", "FTM-USD",
-        "EOS-USD", "SAND-USD", "MANA-USD", "GRT-USD", "CRV-USD",
-        "MKR-USD", "COMP-USD", "SNX-USD", "RUNE-USD", "ONDO-USD",
-    ]
+    # Watchlist — restricted to high-liquidity, low-spread majors
+    watchlist: list[str] = ["BTC-USD", "ETH-USD", "SOL-USD"]
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

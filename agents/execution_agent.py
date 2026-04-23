@@ -65,9 +65,18 @@ class ExecutionAgent:
             logger.warning(f"Execution: zero qty for {symbol}")
             return
 
-        logger.info(f"Execution: placing {side} {qty:.6f} {alpaca_symbol} (${size_usd:,.0f})")
+        # Slippage check: fetch current price, abort if spread > 0.5%
+        current_price = await self._get_current_price(alpaca_symbol)
+        if current_price and current_price > 0:
+            spread_pct = abs(current_price - proposal.suggested_entry) / proposal.suggested_entry * 100
+            if spread_pct > 0.5:
+                logger.warning(f"Execution SLIPPAGE ABORT: {symbol} spread {spread_pct:.2f}% (entry=${proposal.suggested_entry:.4f} vs current=${current_price:.4f})")
+                return
 
-        order = await self._place_alpaca_order(alpaca_symbol, qty, side)
+        limit_price = round(proposal.suggested_entry, 2)
+        logger.info(f"Execution: placing LIMIT {side} {qty:.6f} {alpaca_symbol} @ ${limit_price:,.2f} (${size_usd:,.0f})")
+
+        order = await self._place_alpaca_order(alpaca_symbol, qty, side, limit_price=limit_price)
         if not order:
             logger.error(f"Execution: order failed for {symbol}")
             return
@@ -146,7 +155,7 @@ class ExecutionAgent:
             "filled_price": filled_price, "slippage_bps": slippage,
         })
 
-    async def _place_alpaca_order(self, symbol: str, qty: float, side: str) -> dict | None:
+    async def _place_alpaca_order(self, symbol: str, qty: float, side: str, limit_price: float = None) -> dict | None:
         headers = {
             "APCA-API-KEY-ID": self.alpaca_key,
             "APCA-API-SECRET-KEY": self.alpaca_secret,
@@ -157,9 +166,11 @@ class ExecutionAgent:
             "symbol": symbol,
             "qty": str(round(qty, 6)),
             "side": side,
-            "type": "market",
+            "type": "limit" if limit_price else "market",
             "time_in_force": "gtc",
         }
+        if limit_price:
+            payload["limit_price"] = str(round(limit_price, 2))
 
         async with httpx.AsyncClient(timeout=15) as client:
             try:
@@ -173,4 +184,22 @@ class ExecutionAgent:
                 logger.error(f"Alpaca order failed: {r.status_code} {r.text[:200]}")
             except Exception as e:
                 logger.error(f"Alpaca order error: {e}")
+        return None
+
+    async def _get_current_price(self, symbol: str) -> float | None:
+        """Fetch current price from Alpaca for slippage check."""
+        headers = {
+            "APCA-API-KEY-ID": self.alpaca_key,
+            "APCA-API-SECRET-KEY": self.alpaca_secret,
+        }
+        async with httpx.AsyncClient(timeout=10) as client:
+            try:
+                r = await client.get(
+                    f"{self.alpaca_base}/v2/assets/{symbol}/trades/latest",
+                    headers=headers,
+                )
+                if r.status_code == 200:
+                    return float(r.json().get("trade", {}).get("p", 0))
+            except Exception:
+                pass
         return None
