@@ -209,8 +209,24 @@ class SignalForgeOrchestrator:
         onchain_score = self.scorer.score_onchain(bundle.on_chain) if bundle.on_chain else 50
         altfins_bonus = self.altfins.get_total_bonus(symbol)
 
+        # ── PERPLEXITY SENTIMENT OVERLAY ──
+        pplx_bonus = 0
+        try:
+            from modules.perplexity_intel import get_crypto_sentiment
+            pplx = get_crypto_sentiment(symbol)
+            if "error" not in pplx:
+                pplx_score = pplx.get("sentiment_score", 0)  # -100 to +100
+                pplx_conf = pplx.get("confidence", 0)
+                if pplx_conf >= 70:
+                    pplx_bonus = round(pplx_score / 20, 1)  # ±5 pts max
+                    breakdown["pplx_sentiment"] = pplx_score
+                    breakdown["pplx_catalysts"] = pplx.get("key_catalysts", [])[:3]
+        except Exception as e:
+            logger.debug(f"Perplexity sentiment skipped: {e}")
+
         composite, breakdown = self.scorer.composite_score(
-            tech_score, sent_score, onchain_score, altfins_bonus=altfins_bonus,
+            tech_score, sent_score, onchain_score,
+            altfins_bonus=altfins_bonus + pplx_bonus,
         )
 
         # ── WHALE BOOST ──────────────────────────────────────────────────────────────
