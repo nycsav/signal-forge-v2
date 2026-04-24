@@ -211,22 +211,41 @@ class SignalForgeOrchestrator:
         onchain_score = self.scorer.score_onchain(bundle.on_chain) if bundle.on_chain else 50
         altfins_bonus = self.altfins.get_total_bonus(symbol)
 
-        # ── PERPLEXITY SENTIMENT OVERLAY ──
+        # ── PERPLEXITY MULTI-FACTOR INTELLIGENCE ──
         pplx_bonus = 0
+        pplx_intel = {}
         try:
-            from modules.perplexity_intel import get_crypto_sentiment
-            logger.info(f"PPLX: calling Sonar for {symbol}...")
-            pplx = get_crypto_sentiment(symbol)
-            logger.info(f"PPLX: got {pplx.get('direction', '?')} score={pplx.get('sentiment_score', '?')}")
-            if "error" not in pplx:
-                pplx_score = pplx.get("sentiment_score", 0)  # -100 to +100
-                pplx_conf = pplx.get("confidence", 0)
-                if pplx_conf >= 70:
-                    pplx_bonus = round(pplx_score / 20, 1)  # ±5 pts max
-                    breakdown["pplx_sentiment"] = pplx_score
-                    breakdown["pplx_catalysts"] = pplx.get("key_catalysts", [])[:3]
+            from modules.perplexity_intel import (
+                get_market_intel, should_call_sonar, compute_sonar_bonus,
+                should_block_trade, is_fresh, get_adaptive_interval,
+            )
+            # Adaptive polling: check if we should call based on volatility
+            vol_ratio = technical.volume_ratio if hasattr(technical, 'volume_ratio') else 1.0
+            interval = get_adaptive_interval(symbol, vol_ratio, 1.0)
+            if should_call_sonar(symbol, interval):
+                pplx_intel = get_market_intel(symbol, asset_type="crypto")
+                if "error" not in pplx_intel and is_fresh(pplx_intel):
+                    pplx_bonus = compute_sonar_bonus(pplx_intel)
+                    sent = pplx_intel.get("sentiment", {})
+                    breakdown["pplx_edge"] = pplx_intel.get("edge_score", 0)
+                    breakdown["pplx_sentiment"] = sent.get("score", 0)
+                    breakdown["pplx_confidence"] = sent.get("confidence", 0)
+                    breakdown["pplx_news"] = pplx_intel.get("news_summary", "")[:100]
+
+                    # Hard gate: block if Sonar opposes thesis with low confidence
+                    direction = "long"  # S/R strategy is long-only
+                    blocked, reason = should_block_trade(pplx_intel, direction)
+                    if blocked:
+                        logger.warning(f"SONAR GATE BLOCKED: {symbol} — {reason}")
+                        self.repo.log_signal(
+                            timestamp=market.timestamp.isoformat(), symbol=symbol,
+                            raw_score=0, direction="blocked", decision="sonar_gate",
+                            veto_reason=reason, fear_greed=market.fear_greed_index,
+                            market_regime=market.regime.value,
+                        )
+                        return  # do not publish bundle
         except Exception as e:
-            logger.warning(f"Perplexity sentiment failed: {e}")
+            logger.warning(f"Perplexity intel failed: {e}")
 
         composite, breakdown = self.scorer.composite_score(
             tech_score, sent_score, onchain_score,
