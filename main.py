@@ -105,6 +105,7 @@ class SignalForgeOrchestrator:
 
     async def _on_market_state(self, event: MarketStateEvent):
         self._market_states[event.symbol] = event
+        self._mark_scan()  # watchdog: scan loop is alive
 
         # Feed price to whale strategy (check pending whale entries)
         atr_pct = event.atr_14 / event.price if event.price > 0 and event.atr_14 > 0 else 0.03
@@ -313,10 +314,34 @@ class SignalForgeOrchestrator:
         self.risk.MAX_OPEN_POSITIONS = self.regime.params.max_positions
 
         await self.bus.publish(bundle)
+        self._mark_scan()  # reset watchdog timer
 
         # Clear consumed states to avoid re-processing
         self._market_states.pop(symbol, None)
         self._technical_states.pop(symbol, None)
+
+    def _start_watchdog(self):
+        """Thread-based watchdog that kills process if scan loop stalls >15 min."""
+        import threading, time as _t, os as _os, signal as _s
+        self._last_scan_ts = _t.time()
+
+        def _watchdog():
+            while True:
+                _t.sleep(60)
+                age = _t.time() - self._last_scan_ts
+                if age > 900:  # 15 min
+                    logger.error(f"WATCHDOG: scan loop stalled for {age:.0f}s — killing process")
+                    _os.kill(_os.getpid(), _s.SIGTERM)
+                    break
+
+        t = threading.Thread(target=_watchdog, daemon=True, name="scan-watchdog")
+        t.start()
+        logger.info("Watchdog thread started (kills process if no scan in 15 min)")
+
+    def _mark_scan(self):
+        """Called after every successful scan to reset the watchdog timer."""
+        import time as _t
+        self._last_scan_ts = _t.time()
 
     async def run(self):
         logger.info("Signal Forge v2 starting...")
@@ -328,6 +353,9 @@ class SignalForgeOrchestrator:
         logger.info("Warming up technical indicators...")
         await self.technical.warmup(settings.watchlist[:8])  # Top 8 coins to avoid rate limits
         logger.info("Technical warmup complete — indicators ready for immediate signals")
+
+        # Start watchdog thread (independent of event loop)
+        self._start_watchdog()
 
         # Start event bus
         bus_task = asyncio.create_task(self.bus.run())
