@@ -40,9 +40,6 @@ from agents.scoring import SignalScorer
 from agents.regime_engine import RegimeAdaptiveEngine
 from agents.whale_trigger import WhaleTrigger
 from agents.altfins_enrichment import AltFINSEnrichment
-from agents.performance_analyzer import PerformanceAnalyzer
-from agents.agent_ranking import AgentRanking
-from agents.memory_manager import LayeredMemory
 
 
 # Live watchlist — only the most liquid
@@ -91,13 +88,6 @@ class LiveEngine:
 
         # Whale trigger with direction-aware callback
         self.whale_trigger = WhaleTrigger(event_bus=self.bus, on_signal=self._on_whale_signal)
-
-        # Self-improving feedback loop (same as main.py)
-        self.performance = PerformanceAnalyzer(self.bus)
-        self.agent_ranking = AgentRanking()
-        self.memory = LayeredMemory()
-        self.ai_analyst.agent_ranking = self.agent_ranking
-        self.ai_analyst.memory = self.memory
 
         # Live-specific state
         self.halted = False
