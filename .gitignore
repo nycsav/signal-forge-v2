@@ -6,3 +6,5 @@ logs/
 venv/
 .venv/
 .DS_Store
+reports/*.txt
+reports/*.log
