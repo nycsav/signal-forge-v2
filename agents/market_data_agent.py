@@ -52,7 +52,12 @@ class MarketDataAgent:
             self._altfins_trigger_task = asyncio.create_task(self._altfins_trigger_loop())
         while True:
             try:
-                await self._scan_all()
+                # Watchdog: kill process if scan takes >5 min (forces launchd restart)
+                await asyncio.wait_for(self._scan_all(), timeout=300)
+            except asyncio.TimeoutError:
+                logger.error("WATCHDOG: scan_all exceeded 5 min — killing process for restart")
+                import os, signal
+                os.kill(os.getpid(), signal.SIGTERM)
             except Exception as e:
                 logger.error(f"MarketDataAgent error: {e}")
             await asyncio.sleep(interval_seconds)
