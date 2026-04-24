@@ -27,9 +27,9 @@ class MonitorAgent:
     # Exit parameters — tuned 2026-04-16 to fix win/loss asymmetry
     # Old: 2.5x stop, 1.5R TP1 → net negative (stop too wide, TP1 too tight)
     # New: 2.0x stop, 2R/4R/6R TPs → positive expectancy at 44%+ win rate
-    ATR_STOP_MULT = 2.0  # tightened from 2.5 — hard stop losses were 2.4x bigger than wins
-    ATR_ACTIVATION_MULT = 0.75  # activate trailing early — S/R entries have tighter stops, trail sooner
-    MAX_LOSS_PER_TRADE_USD = 15.0  # absolute dollar cap — FIL/PEPE were losing $30-40 per trade
+    ATR_STOP_MULT = 1.5  # tightened from 2.0 — hard stop avg was still -$5.27
+    ATR_ACTIVATION_MULT = 1.5  # raised from 0.75 — let winners run, avg win was only $1.61
+    MAX_LOSS_PER_TRADE_USD = 10.0  # tightened from $15 — worst loss was $17, target max $10
     TP1_R = 2.0   # TP1 at 2× risk (was 1.5)
     TP2_R = 4.0   # TP2 at 4× risk (was 3.0)
     TP3_R = 6.0   # TP3 at 6× risk (was 5.0)
@@ -94,6 +94,26 @@ class MonitorAgent:
                 logger.info(f"FD HEALTH: {fd_count} open file descriptors — elevated")
         except Exception:
             pass
+
+    async def _check_daily_loss_guard(self):
+        """Theme 4: Auto-pause if daily realized losses exceed threshold."""
+        try:
+            import sqlite3
+            from config.settings import settings as _s
+            conn = sqlite3.connect(str(_s.database_path), timeout=3)
+            try:
+                row = conn.execute(
+                    "SELECT coalesce(sum(pnl_usd), 0) FROM trades WHERE status='closed' AND date(closed_at)=date('now') AND close_reason NOT IN ('stale_cleanup','orphan_no_position','orphan_cleanup')"
+                ).fetchone()
+                daily_pnl = row[0] if row else 0
+                if daily_pnl < -200:
+                    logger.warning(f"DAILY LOSS GUARD: ${daily_pnl:.2f} exceeds -$200 limit — halting new entries")
+                    return True  # signal to halt
+            finally:
+                conn.close()
+        except Exception:
+            pass
+        return False
 
     async def _evaluate_all(self):
         positions = await self._fetch_alpaca_positions()

@@ -71,9 +71,10 @@ class SRStrategy:
                 if tech.bb_position < 0.1:
                     continue  # still at bottom of bands
 
-                # Volume confirmation: above-average volume on the bounce
-                if tech.volume_ratio < 0.8:
-                    continue  # thin volume bounce = weak (loosened from 1.0)
+                # Volume confirmation: require confirmed volume on bounce
+                # Theme 1: less is more — tighter volume gate = fewer false entries
+                if tech.volume_ratio < 1.3:
+                    continue  # require 1.3x avg volume for confirmed move
 
                 # Entry signal: price near support + bouncing + volume
                 atr = price * tech.atr_14_pct if tech.atr_14_pct > 0 else price * 0.03
