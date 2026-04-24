@@ -223,7 +223,15 @@ class SignalForgeOrchestrator:
             vol_ratio = technical.volume_ratio if hasattr(technical, 'volume_ratio') else 1.0
             interval = get_adaptive_interval(symbol, vol_ratio, 1.0)
             if should_call_sonar(symbol, interval):
-                pplx_intel = get_market_intel(symbol, asset_type="crypto")
+                # Run in thread to prevent blocking the async event loop
+                try:
+                    pplx_intel = await asyncio.wait_for(
+                        asyncio.to_thread(get_market_intel, symbol, "crypto"),
+                        timeout=12,
+                    )
+                except (asyncio.TimeoutError, Exception) as te:
+                    logger.warning(f"PPLX timeout for {symbol}: {te}")
+                    pplx_intel = {"error": "async_timeout"}
                 if "error" not in pplx_intel and is_fresh(pplx_intel):
                     pplx_bonus = compute_sonar_bonus(pplx_intel)
                     sent = pplx_intel.get("sentiment", {})
