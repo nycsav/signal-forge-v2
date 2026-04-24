@@ -62,15 +62,24 @@ class MarketDataAgent:
             except Exception as e:
                 logger.error(f"MarketDataAgent error: {e}")
 
-            # Sleep in 30s chunks so watchdog can check for stalled event loop
-            elapsed = 0
-            while elapsed < interval_seconds:
-                await asyncio.sleep(min(30, interval_seconds - elapsed))
-                elapsed += 30
-                # If no scan completed in 20 min, event loop is stalled — kill
-                if _time.time() - self._last_scan_time > 1200:
-                    logger.error(f"WATCHDOG: no scan in {_time.time() - self._last_scan_time:.0f}s — killing for restart")
-                    os.kill(os.getpid(), _sig.SIGTERM)
+            # Use threading watchdog since asyncio.sleep can stall with the event loop
+            import threading
+            def _watchdog_thread():
+                """Separate thread that kills process if scan loop stalls >15 min."""
+                while True:
+                    _time.sleep(60)
+                    age = _time.time() - self._last_scan_time
+                    if age > 900:  # 15 min
+                        logger.error(f"WATCHDOG THREAD: no scan in {age:.0f}s — killing for restart")
+                        os.kill(os.getpid(), _sig.SIGTERM)
+                        break
+
+            if not hasattr(self, '_watchdog_started'):
+                t = threading.Thread(target=_watchdog_thread, daemon=True)
+                t.start()
+                self._watchdog_started = True
+
+            await asyncio.sleep(interval_seconds)
 
     async def _scan_all(self):
         logger.info(f"MarketDataAgent scanning {len(self.watchlist)} assets (full stack)...")
