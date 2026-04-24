@@ -10,6 +10,8 @@ import signal as sig
 from datetime import datetime
 from loguru import logger
 import uvicorn
+from dotenv import load_dotenv
+load_dotenv(override=True)
 
 from config.settings import settings
 from agents.event_bus import EventBus
@@ -213,7 +215,9 @@ class SignalForgeOrchestrator:
         pplx_bonus = 0
         try:
             from modules.perplexity_intel import get_crypto_sentiment
+            logger.info(f"PPLX: calling Sonar for {symbol}...")
             pplx = get_crypto_sentiment(symbol)
+            logger.info(f"PPLX: got {pplx.get('direction', '?')} score={pplx.get('sentiment_score', '?')}")
             if "error" not in pplx:
                 pplx_score = pplx.get("sentiment_score", 0)  # -100 to +100
                 pplx_conf = pplx.get("confidence", 0)
@@ -222,7 +226,7 @@ class SignalForgeOrchestrator:
                     breakdown["pplx_sentiment"] = pplx_score
                     breakdown["pplx_catalysts"] = pplx.get("key_catalysts", [])[:3]
         except Exception as e:
-            logger.debug(f"Perplexity sentiment skipped: {e}")
+            logger.warning(f"Perplexity sentiment failed: {e}")
 
         composite, breakdown = self.scorer.composite_score(
             tech_score, sent_score, onchain_score,
