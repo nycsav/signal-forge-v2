@@ -56,6 +56,7 @@ class WhaleTrigger:
         self._seen_txs: set[str] = set()
         self._last_signal_time: float = 0
         self._cooldown = 120
+        self._latest_signals: dict[str, dict] = {}  # symbol → latest signal
 
     async def run_forever(self):
         """Main loop: global scan every 60s, per-asset scan every 15 min."""
@@ -246,6 +247,10 @@ class WhaleTrigger:
             return signal
         return None
 
+    def get_latest_signal(self, symbol: str) -> dict | None:
+        """Return most recent whale signal for a symbol, or None."""
+        return self._latest_signals.get(symbol)
+
     async def _fire_signal(self, signal: dict):
         """Fire a whale signal at HIGH priority."""
         now = time.time()
@@ -253,6 +258,11 @@ class WhaleTrigger:
             return
 
         self._last_signal_time = now
+
+        # Store for get_latest_signal() lookups
+        sym = signal.get("symbol", "")
+        if sym:
+            self._latest_signals[sym] = signal
 
         logger.warning(
             f"WHALE [{signal['direction'].upper()}] str={signal.get('strength',0)}/5: "

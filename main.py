@@ -213,6 +213,16 @@ class SignalForgeOrchestrator:
             tech_score, sent_score, onchain_score, altfins_bonus=altfins_bonus,
         )
 
+        # ── WHALE BOOST ──
+        whale_bonus = 0
+        recent_whale = self.whale_trigger.get_latest_signal(symbol)
+        if recent_whale and recent_whale.get("direction") == "bullish":
+            strength = recent_whale.get("strength", 0)
+            whale_bonus = min(10, strength * 2)  # cap at +10 pts
+            logger.info(f"WHALE BOOST: {symbol} +{whale_bonus} pts (strength {strength}/5)")
+            composite = min(100, composite + whale_bonus)
+            breakdown["whale_boost"] = whale_bonus
+
         # Use adaptive threshold instead of fixed
         adaptive_threshold = self.regime.params.score_threshold
 
