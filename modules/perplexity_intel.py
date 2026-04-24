@@ -21,9 +21,13 @@ from typing import Optional
 import httpx
 from loguru import logger
 
-PPLX_API_KEY = os.getenv("PPLX_API_KEY", "")
 PPLX_BASE = "https://api.perplexity.ai"
 MODEL = "sonar"
+
+
+def _get_key() -> str:
+    """Lazy-load PPLX key — ensures .env is loaded first."""
+    return os.getenv("PPLX_API_KEY", "")
 
 
 def _call_sonar(
@@ -35,11 +39,12 @@ def _call_sonar(
     model: str = MODEL,
 ) -> dict:
     """Call Perplexity Sonar API with structured output."""
-    if not PPLX_API_KEY:
+    api_key = _get_key()
+    if not api_key:
         return {"error": "PPLX_API_KEY not set"}
 
     headers = {
-        "Authorization": f"Bearer {PPLX_API_KEY}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
 
