@@ -47,20 +47,30 @@ class MarketDataAgent:
         self._altfins_trigger_task: asyncio.Task | None = None
 
     async def run_forever(self, interval_seconds: int = 900):
+        import os, signal as _sig, time as _time
         # Launch the altFINS direct-trigger loop alongside the periodic scan
         if self.altfins_key and self._altfins_trigger_task is None:
             self._altfins_trigger_task = asyncio.create_task(self._altfins_trigger_loop())
+        self._last_scan_time = _time.time()
         while True:
             try:
-                # Watchdog: kill process if scan takes >5 min (forces launchd restart)
                 await asyncio.wait_for(self._scan_all(), timeout=300)
+                self._last_scan_time = _time.time()
             except asyncio.TimeoutError:
-                logger.error("WATCHDOG: scan_all exceeded 5 min — killing process for restart")
-                import os, signal
-                os.kill(os.getpid(), signal.SIGTERM)
+                logger.error("WATCHDOG: scan_all exceeded 5 min — killing for restart")
+                os.kill(os.getpid(), _sig.SIGTERM)
             except Exception as e:
                 logger.error(f"MarketDataAgent error: {e}")
-            await asyncio.sleep(interval_seconds)
+
+            # Sleep in 30s chunks so watchdog can check for stalled event loop
+            elapsed = 0
+            while elapsed < interval_seconds:
+                await asyncio.sleep(min(30, interval_seconds - elapsed))
+                elapsed += 30
+                # If no scan completed in 20 min, event loop is stalled — kill
+                if _time.time() - self._last_scan_time > 1200:
+                    logger.error(f"WATCHDOG: no scan in {_time.time() - self._last_scan_time:.0f}s — killing for restart")
+                    os.kill(os.getpid(), _sig.SIGTERM)
 
     async def _scan_all(self):
         logger.info(f"MarketDataAgent scanning {len(self.watchlist)} assets (full stack)...")
