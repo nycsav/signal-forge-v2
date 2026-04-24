@@ -191,14 +191,18 @@ class SignalScorer:
         ai_score: float = 50.0,
         altfins_bonus: float = 0.0,
         fib_score_adj: float = 0.0,
+        whale_confidence: float = 0.0,
+        fg_boost: float = 1.0,
     ) -> tuple[float, dict]:
         """Combine all component scores into final 0-100 composite.
 
-        ``altfins_bonus`` is an additive bonus (0-35) from the altFINS
+        ``altfins_bonus`` is an additive bonus (0-20) from the altFINS
         enrichment layer (chart patterns + oversold-in-uptrend filter).
         ``fib_score_adj`` is an additive adjustment (-10 to +10) from
         multi-timeframe Fibonacci analysis (golden pocket, confluence).
-        Both applied after the weighted sum, before clamping.
+        ``whale_confidence`` (0-1) — if > 0.7, apply 1.20x multiplier.
+        ``fg_boost`` — Fear & Greed multiplier (0.90 to 1.10).
+        All applied after the weighted sum, before clamping.
 
         Returns (composite_score, breakdown_dict).
         """
@@ -211,6 +215,16 @@ class SignalScorer:
         )
         composite += altfins_bonus
         composite += fib_score_adj
+
+        # Whale confidence boost: 1.20x when whale_confidence > 0.7
+        whale_boost = 1.0
+        if whale_confidence > 0.7:
+            whale_boost = 1.20
+            composite *= whale_boost
+
+        # Fear & Greed overlay
+        composite *= fg_boost
+
         composite = max(0, min(100, composite))
 
         breakdown = {
@@ -218,6 +232,8 @@ class SignalScorer:
             "sentiment": round(sentiment_score, 1),
             "on_chain": round(onchain_score, 1),
             "ai_analyst": round(ai_score, 1),
+            "whale_boost": whale_boost,
+            "fg_boost": round(fg_boost, 2),
             "altfins_bonus": round(altfins_bonus, 1),
             "fib_adj": round(fib_score_adj, 1),
             "composite": round(composite, 1),
