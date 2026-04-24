@@ -213,15 +213,37 @@ class SignalForgeOrchestrator:
             tech_score, sent_score, onchain_score, altfins_bonus=altfins_bonus,
         )
 
-        # ── WHALE BOOST ──
+        # ── WHALE BOOST ──────────────────────────────────────────────────────────────
+        # Wire Arkham whale intelligence into composite score.
+        # WhaleTrigger already caches signals per symbol via get_latest_signal().
+        # Bullish whale = smart money accumulation = score boost.
+        # Bearish whale = selling pressure = score penalty.
+        # Strength scale: 0–5 (per whale_trigger.py classification logic)
         whale_bonus = 0
-        recent_whale = self.whale_trigger.get_latest_signal(symbol)
-        if recent_whale and recent_whale.get("direction") == "bullish":
+        whale_sym = symbol.replace("-USD", "").replace("/USD", "")  # BTC-USD → BTC
+        recent_whale = self.whale_trigger.get_latest_signal(whale_sym)
+        whale_age_ok = False
+        if recent_whale:
+            try:
+                ts = datetime.fromisoformat(recent_whale.get("timestamp", ""))
+                whale_age_ok = (datetime.now() - ts) < timedelta(hours=2)
+            except Exception:
+                whale_age_ok = True  # if timestamp missing, allow it
+        if recent_whale and whale_age_ok:
+            direction = recent_whale.get("direction", "neutral")
             strength = recent_whale.get("strength", 0)
-            whale_bonus = min(10, strength * 2)  # cap at +10 pts
-            logger.info(f"WHALE BOOST: {symbol} +{whale_bonus} pts (strength {strength}/5)")
-            composite = min(100, composite + whale_bonus)
+            if direction == "bullish":
+                whale_bonus = min(10, strength * 2)   # +2 pts per strength unit, cap +10
+            elif direction == "bearish":
+                whale_bonus = max(-8, -(strength * 2)) # -2 pts per strength unit, floor -8
+            if whale_bonus != 0:
+                logger.info(
+                    f"WHALE BOOST: {symbol} {'+' if whale_bonus > 0 else ''}{whale_bonus} pts "
+                    f"({direction}, strength {strength}/5)"
+                )
+            composite = max(0, min(100, composite + whale_bonus))
             breakdown["whale_boost"] = whale_bonus
+        # ─────────────────────────────────────────────────────────────────────────────
 
         # Use adaptive threshold instead of fixed
         adaptive_threshold = self.regime.params.score_threshold

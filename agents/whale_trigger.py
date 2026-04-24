@@ -260,9 +260,10 @@ class WhaleTrigger:
         self._last_signal_time = now
 
         # Store for get_latest_signal() lookups
-        sym = signal.get("symbol", "")
+        sym = signal.get("symbol", signal.get("asset", ""))
         if sym:
             self._latest_signals[sym] = signal
+            self._latest_signals[sym.upper()] = signal   # normalize to uppercase
 
         logger.warning(
             f"WHALE [{signal['direction'].upper()}] str={signal.get('strength',0)}/5: "
