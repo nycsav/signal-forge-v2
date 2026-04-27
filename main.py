@@ -31,6 +31,8 @@ from agents.regime_engine import RegimeAdaptiveEngine
 from agents.whale_trigger import WhaleTrigger
 from agents.chart_pattern_agent import ChartPatternAgent
 from agents.altfins_enrichment import AltFINSEnrichment
+from agents.email_signal_agent import EmailSignalAgent
+from agents.events import EmailSignalEvent
 from agents.scoring import SignalScorer
 from agents.sr_strategy import SRStrategy
 from agents.whale_entry_strategy import WhaleEntryStrategy
@@ -76,6 +78,9 @@ class SignalForgeOrchestrator:
         self.chart_patterns = ChartPatternAgent(self.bus)
         self.regime = RegimeAdaptiveEngine(settings.database_path)
 
+        # Email Signal Agent (Gmail MCP integration)
+        self.email_signal = EmailSignalAgent(self.bus, config)
+
         # New entry strategies (added 2026-04-19 after Day 3 review)
         self.sr_strategy = SRStrategy(self.bus)           # S/R mean reversion
         self.whale_strategy = WhaleEntryStrategy(self.bus) # Whale-triggered entries
@@ -95,6 +100,9 @@ class SignalForgeOrchestrator:
         self.bus.subscribe(SentimentEvent, self._on_sentiment)
         self.bus.subscribe(OnChainEvent, self._on_onchain)
 
+        # Subscribe to email signals
+        self.bus.subscribe(EmailSignalEvent, self._on_email_signal)
+
         # Feed trade results back to AI analyst for adaptive cooldown
         from agents.events import TradeClosedEvent
         self.bus.subscribe(TradeClosedEvent, self._on_trade_closed_feedback)
@@ -102,6 +110,21 @@ class SignalForgeOrchestrator:
     async def _on_trade_closed_feedback(self, event):
         """Feed trade P&L back to AI analyst for adaptive cooldown."""
         self.ai_analyst.record_trade_result(event.pnl_pct, symbol=event.order_id)
+
+    async def _on_email_signal(self, event: EmailSignalEvent):
+        """Handle email-derived signals. High-confidence breakouts trigger immediate scan."""
+        logger.info(
+            f"EMAIL SIGNAL: {event.source} | {event.signal_type} | "
+            f"symbols={event.symbols} dir={event.direction} conf={event.confidence:.2f}"
+        )
+        # High-confidence pattern breakout → trigger immediate scan of the symbol
+        if event.signal_type == "pattern_breakout" and event.confidence >= 0.7:
+            for sym in event.symbols:
+                logger.warning(f"EMAIL BREAKOUT: triggering immediate scan for {sym}")
+                try:
+                    await self.market_data._scan_symbol(sym)
+                except Exception as e:
+                    logger.error(f"Email-triggered scan failed for {sym}: {e}")
 
     async def _on_market_state(self, event: MarketStateEvent):
         self._market_states[event.symbol] = event
@@ -256,9 +279,12 @@ class SignalForgeOrchestrator:
         except Exception as e:
             logger.warning(f"Perplexity intel failed: {e}")
 
+        email_bonus = self.email_signal.get_email_bonus(symbol)
+
         composite, breakdown = self.scorer.composite_score(
             tech_score, sent_score, onchain_score,
             altfins_bonus=altfins_bonus + pplx_bonus,
+            email_bonus=email_bonus,
         )
 
         # ── WHALE BOOST ──────────────────────────────────────────────────────────────
@@ -363,8 +389,12 @@ class SignalForgeOrchestrator:
         # Start altFINS enrichment background polling (patterns 4h, screener 15m)
         await self.altfins.start()
 
+        # Start Email Signal Agent (Gmail MCP integration)
+        await self.email_signal.start()
+
         # Pass enrichment ref to RiskAgent for pre-execution checks
         self.risk.altfins = self.altfins
+        self.risk.email_signal = self.email_signal
 
         # Start agent loops
         agent_tasks = [

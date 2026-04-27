@@ -233,3 +233,19 @@ class StrategyAdaptationEvent(BaseModel):
     old_params: dict = Field(default_factory=dict)
     new_params: dict = Field(default_factory=dict)
     reason: str = ""
+
+
+# ── EMAIL SIGNAL EVENTS ─────────────────────────────────────
+
+class EmailSignalEvent(BaseModel):
+    """Emitted by EmailSignalAgent when email-derived signals are extracted."""
+    timestamp: datetime
+    source: str                    # "altfins", "coinbase_research", "cmc", "coingecko", "stocktwits", "cheap_investor"
+    signal_type: str               # "pattern_breakout", "regime_call", "fg_index", etc.
+    symbols: list[str] = Field(default_factory=list)
+    direction: str = "neutral"     # "bullish", "bearish", "neutral"
+    confidence: float = 0.5
+    score_bonus: float = 0.0
+    details: dict = Field(default_factory=dict)
+    gmail_message_id: str = ""
+    cross_validated: bool = False

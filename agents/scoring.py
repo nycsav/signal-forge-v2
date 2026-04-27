@@ -193,6 +193,7 @@ class SignalScorer:
         fib_score_adj: float = 0.0,
         whale_confidence: float = 0.0,
         fg_boost: float = 1.0,
+        email_bonus: float = 0.0,
     ) -> tuple[float, dict]:
         """Combine all component scores into final 0-100 composite.
 
@@ -215,6 +216,7 @@ class SignalScorer:
         )
         composite += altfins_bonus
         composite += fib_score_adj
+        composite += email_bonus
 
         # Whale confidence boost: 1.20x when whale_confidence > 0.7
         whale_boost = 1.0
@@ -236,6 +238,7 @@ class SignalScorer:
             "fg_boost": round(fg_boost, 2),
             "altfins_bonus": round(altfins_bonus, 1),
             "fib_adj": round(fib_score_adj, 1),
+            "email_bonus": round(email_bonus, 1),
             "composite": round(composite, 1),
         }
 

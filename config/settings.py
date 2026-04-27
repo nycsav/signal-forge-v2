@@ -52,6 +52,12 @@ class Settings(BaseSettings):
     # Watchlist — restricted to high-liquidity, low-spread majors
     watchlist: list[str] = ["BTC-USD", "ETH-USD", "SOL-USD"]
 
+    # Email Signal Agent
+    email_signal_enabled: bool = True
+    gmail_mcp_server_path: str = "/Users/sav/gmail-mcp-server/src/server.ts"
+    email_scan_hours_est: list[int] = [6, 14, 22]
+    email_max_bonus: float = 15.0
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
 

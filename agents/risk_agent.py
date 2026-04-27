@@ -312,6 +312,15 @@ class RiskAgent:
         final = half_kelly * conviction * ai_mod
         final_pct = min(self.MAX_POSITION_PCT, max(0.005, final))
 
+        # Email Signal Agent: regime adjustment and fragility flag
+        email_regime_mult = self.email_signal.get_regime_adjustment() if hasattr(self, 'email_signal') and self.email_signal else 1.0
+        final_pct *= email_regime_mult
+
+        fragility = self.email_signal.get_fragility_flag() if hasattr(self, 'email_signal') and self.email_signal else False
+        if fragility:
+            max_position = self.MAX_POSITION_PCT * 0.5
+            final_pct = min(final_pct, max_position)
+
         # Sub-$1K account path: bypass Half-Kelly and size at a flat 10% of
         # equity. If 10% is below the exchange minimum (MIN_ORDER_USD), bump
         # the percentage up just enough to clear it. Larger accounts (>=$1K)
