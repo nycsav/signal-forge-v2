@@ -1,7 +1,7 @@
 {
   "components": {
     "technical": {
-      "weight": 0.314,
+      "weight": 0.338,
       "sub_weights": {
         "rsi": 0.2,
         "macd": 0.15,
@@ -13,7 +13,7 @@
       }
     },
     "sentiment": {
-      "weight": 0.326,
+      "weight": 0.272,
       "sub_weights": {
         "fear_greed": 0.4,
         "sonar_sentiment": 0.35,
@@ -21,7 +21,7 @@
       }
     },
     "on_chain": {
-      "weight": 0.18,
+      "weight": 0.195,
       "sub_weights": {
         "whale_flow": 0.4,
         "exchange_flow": 0.3,
@@ -29,7 +29,7 @@
       }
     },
     "ai_analyst": {
-      "weight": 0.18
+      "weight": 0.195
     }
   },
   "thresholds": {

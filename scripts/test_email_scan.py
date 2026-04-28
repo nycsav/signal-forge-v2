@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """
-Live test of EmailSignalAgent: scan Gmail, extract signals, output trading plan.
+Quick 3-source test scan for debugging the email signal pipeline.
+
+Scans only altfins, coinbase_research, and cmc (7-day lookback, 3 emails each)
+to verify Gmail bridge, Ollama extraction, and cross-validation are working.
+For the full 6-source production scan, use scripts/full_signal_scan.py.
+
 Run from SF2 root: python scripts/test_email_scan.py
 """
 import asyncio
