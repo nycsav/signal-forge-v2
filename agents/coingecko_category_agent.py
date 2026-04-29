@@ -184,6 +184,46 @@ def scan() -> list:
     return signals
 
 
+def cross_reference_email_tokens(email_tokens: list[str]) -> list[dict]:
+    """Cross-reference tokens from CoinGecko email with category signals DB.
+
+    If a token appears in both the daily email AND the category momentum scan,
+    it's a high-conviction day trade candidate.
+
+    Args:
+        email_tokens: list of ticker symbols from CoinGecko email (e.g. ["HYPE", "SOL"])
+
+    Returns:
+        list of cross-validated signals with boosted confidence
+    """
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    cross_validated = []
+
+    for symbol in email_tokens:
+        cur = conn.execute("""
+            SELECT symbol, category, coin_change_24h, phase, confidence, price_usd, timestamp
+            FROM category_signals
+            WHERE symbol = ? AND datetime(timestamp) > datetime('now', '-24 hours')
+            ORDER BY timestamp DESC LIMIT 1
+        """, (symbol.upper(),))
+        row = cur.fetchone()
+        if row:
+            cross_validated.append({
+                "symbol": row[0],
+                "category": row[1],
+                "coin_change_24h": row[2],
+                "phase": row[3],
+                "confidence": min(0.95, row[4] + 0.15),  # boost for cross-validation
+                "price_usd": row[5],
+                "cross_validated": True,
+                "source": "coingecko_email + category_agent",
+            })
+
+    conn.close()
+    return cross_validated
+
+
 if __name__ == "__main__":
     results = scan()
     if results:

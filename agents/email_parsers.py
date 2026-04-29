@@ -241,32 +241,48 @@ Return ONLY a valid JSON array, no other text.""",
     # ── 4. CoinGecko ──────────────────────────────────────────
     "coingecko": {
         "gmail_query": "from:coingecko.com newer_than:10h",
-        "signal_types": ["trending_token"],
+        "signal_types": ["trending_token", "hot_search", "day_trade_candidate"],
         "score_bonus_map": {
-            "trending_token": 5,  # if 2+ appearances
+            "trending_token": 5,       # if 2+ appearances
+            "hot_search": 4,           # 24h Hot Searches with strong moves
+            "day_trade_candidate": 8,  # high volume + strong move = day trade
         },
-        "extract_prompt": """You are a crypto signal extraction engine. Analyze this CoinGecko newsletter and extract trending token signals.
+        "extract_prompt": """You are a crypto day-trading signal extraction engine. Analyze this CoinGecko newsletter and extract EVERY token mentioned with price data.
 
 EMAIL CONTENT:
 {body}
 
-Extract every trending token signal into a JSON array. For each signal include:
-- "signal_type": "trending_token"
-- "symbols": list with the token's ticker symbol (e.g. ["SOL"])
-- "direction": "bullish" (trending = momentum) or "neutral"
-- "confidence": 0.0 to 1.0 (higher if token appeared multiple times or has strong price change)
-- "details": object with:
-  - "price_change_24h_pct": number (percentage price change)
+This email contains top trending tokens, 24h Hot Searches, and market data. Extract ALL tokens mentioned into a JSON array.
+
+For each token, determine the signal_type:
+- "day_trade_candidate": token has >10% gain AND appears in hot searches or trending (best for day trading)
+- "hot_search": token appears in "24h Hot Searches Worldwide" section with price change
+- "trending_token": token mentioned in trending/news sections
+
+For each signal include:
+- "signal_type": one of the above
+- "symbols": list with the token ticker (e.g. ["SOL", "HYPE"])
+- "direction": "bullish" if price change positive, "bearish" if negative, "neutral" if flat
+- "confidence": 0.0 to 1.0:
+  - day_trade_candidate with >20% gain: 0.8+
+  - hot_search with >10% gain: 0.7
+  - trending_token: 0.5-0.6
+- "details": object with ALL available data:
+  - "price_change_24h_pct": number (REQUIRED - the percentage shown next to the token)
   - "price_change_7d_pct": number if available
-  - "appearances": number of times this token appears in the trending list
-  - "rank": position in trending list
-  - "category": token category if mentioned (e.g. "DeFi", "L1", "Meme")
+  - "price_usd": current price if shown
+  - "market_cap": if mentioned
+  - "volume_24h": if mentioned
+  - "rank_in_list": position in the trending/hot search list
+  - "category": token category if mentioned (DeFi, L1, Meme, AI, etc)
+  - "narrative": brief note on why it's trending if mentioned
 
 Rules:
-- Track how many times each symbol appears across the email; set appearances count
-- Tokens with 2+ appearances get higher confidence (0.7+)
-- Include price change percentages when mentioned
-- Return an empty array [] if no trending tokens found
+- Extract EVERY token with a percentage change shown, even small ones
+- Tokens appearing in BOTH hot searches AND trending = day_trade_candidate (highest priority)
+- Include BTC and ETH even though they always appear — their % change sets the market context
+- Negative price changes are still signals (bearish direction)
+- Return an empty array [] ONLY if the email has zero tokens with price data
 
 Return ONLY a valid JSON array, no other text.""",
     },
