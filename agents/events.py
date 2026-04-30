@@ -249,3 +249,27 @@ class EmailSignalEvent(BaseModel):
     details: dict = Field(default_factory=dict)
     gmail_message_id: str = ""
     cross_validated: bool = False
+
+
+# ── SMART MONEY EVENTS (CMC DexScan) ─────────────────────────
+
+class SmartMoneyEvent(BaseModel):
+    """Emitted by SmartMoneyAgent when on-chain smart money activity is detected."""
+    timestamp: datetime
+    source: str = "cmc_dexscan"
+    signal_type: str               # "accumulation", "distribution", "momentum_breakout",
+                                   # "liquidity_surge", "smart_money_trending", "early_discovery"
+    symbols: list[str] = Field(default_factory=list)
+    direction: str = "neutral"     # "bullish", "bearish", "neutral"
+    confidence: float = 0.5
+    score_bonus: float = 0.0
+    chain: str = ""                # "ethereum", "solana", "base", etc.
+    token_address: str = ""
+    price_usd: float = 0.0
+    price_change_24h: float = 0.0
+    volume_24h: float = 0.0
+    market_cap: float = 0.0
+    liquidity_change_pct: float = 0.0
+    holder_change_pct: float = 0.0
+    security_flags: list[str] = Field(default_factory=list)
+    reason: str = ""

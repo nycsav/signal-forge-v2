@@ -32,7 +32,8 @@ from agents.whale_trigger import WhaleTrigger
 from agents.chart_pattern_agent import ChartPatternAgent
 from agents.altfins_enrichment import AltFINSEnrichment
 from agents.email_signal_agent import EmailSignalAgent
-from agents.events import EmailSignalEvent
+from agents.smart_money_agent import SmartMoneyAgent
+from agents.events import EmailSignalEvent, SmartMoneyEvent
 from agents.scoring import SignalScorer
 from agents.sr_strategy import SRStrategy
 from agents.whale_entry_strategy import WhaleEntryStrategy
@@ -81,6 +82,9 @@ class SignalForgeOrchestrator:
         # Email Signal Agent (Gmail MCP integration)
         self.email_signal = EmailSignalAgent(self.bus, config)
 
+        # Smart Money Agent (CMC DexScan integration)
+        self.smart_money = SmartMoneyAgent(self.bus, config)
+
         # New entry strategies (added 2026-04-19 after Day 3 review)
         self.sr_strategy = SRStrategy(self.bus)           # S/R mean reversion
         self.whale_strategy = WhaleEntryStrategy(self.bus) # Whale-triggered entries
@@ -102,6 +106,9 @@ class SignalForgeOrchestrator:
 
         # Subscribe to email signals
         self.bus.subscribe(EmailSignalEvent, self._on_email_signal)
+
+        # Subscribe to smart money signals
+        self.bus.subscribe(SmartMoneyEvent, self._on_smart_money)
 
         # Feed trade results back to AI analyst for adaptive cooldown
         from agents.events import TradeClosedEvent
@@ -125,6 +132,25 @@ class SignalForgeOrchestrator:
                     await self.market_data._scan_symbol(sym)
                 except Exception as e:
                     logger.error(f"Email-triggered scan failed for {sym}: {e}")
+
+    async def _on_smart_money(self, event: SmartMoneyEvent):
+        """Handle CMC DexScan smart money signals."""
+        logger.info(
+            f"SMART MONEY: {event.signal_type} | {event.symbols} | "
+            f"dir={event.direction} conf={event.confidence:.2f} chain={event.chain} — {event.reason}"
+        )
+        # High-confidence accumulation/breakout on watchlist tokens → trigger scan
+        watchlist_symbols = {w.replace("-USD", "") for w in settings.watchlist}
+        for sym in event.symbols:
+            if sym in watchlist_symbols and event.confidence >= 0.65:
+                logger.warning(f"SMART MONEY WATCHLIST HIT: triggering scan for {sym}")
+                try:
+                    await self.market_data._scan_symbol(f"{sym}-USD")
+                except Exception as e:
+                    logger.error(f"Smart money triggered scan failed for {sym}: {e}")
+
+        # Log the event
+        self.repo.log_event("smart_money", f"sm_{event.signal_type}", None, event.model_dump())
 
     async def _on_market_state(self, event: MarketStateEvent):
         self._market_states[event.symbol] = event
@@ -392,6 +418,9 @@ class SignalForgeOrchestrator:
         # Start Email Signal Agent (Gmail MCP integration)
         await self.email_signal.start()
 
+        # Smart Money Agent ref for RiskAgent cross-validation
+        self.risk.smart_money = self.smart_money
+
         # Pass enrichment ref to RiskAgent for pre-execution checks
         self.risk.altfins = self.altfins
         self.risk.email_signal = self.email_signal
@@ -408,6 +437,7 @@ class SignalForgeOrchestrator:
             )),
             asyncio.create_task(self.whale_trigger.run_forever()),  # 60s whale monitoring
             asyncio.create_task(self.chart_patterns.run_forever(interval_seconds=14400)),  # 4h pattern scan
+            asyncio.create_task(self.smart_money.run_forever()),  # 15min CMC DexScan smart money
         ]
 
         # Dashboard runs separately on port 8888 (dashboard_server.py)
