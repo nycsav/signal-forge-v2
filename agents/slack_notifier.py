@@ -113,42 +113,106 @@ class SlackNotifier:
     # ── Message Formatters ────────────────────────────────────
 
     def _format_trade_proposal(self, proposal: TradeProposal) -> tuple[str, list]:
-        """Format a trade proposal as a rich Slack message."""
-        direction_emoji = "🟢" if proposal.direction.value == "long" else "🔴"
+        """Format a trade proposal with full P&L numbers and exit strategy."""
+        direction_label = "LONG" if proposal.direction.value == "long" else "SHORT"
         confidence_bar = "█" * int(proposal.ai_confidence * 10) + "░" * (10 - int(proposal.ai_confidence * 10))
 
+        entry = proposal.suggested_entry
+        stop = proposal.suggested_stop
+        tp1 = proposal.suggested_tp1
+        tp2 = proposal.suggested_tp2
+        tp3 = proposal.suggested_tp3
+
+        # Risk/reward and P&L calculations
+        risk_per_unit = abs(entry - stop) if stop else 0
+        reward_tp1 = abs(tp1 - entry) if tp1 else 0
+        reward_tp2 = abs(tp2 - entry) if tp2 else 0
+        reward_tp3 = abs(tp3 - entry) if tp3 else 0
+        rr_ratio = f"{reward_tp1 / risk_per_unit:.1f}:1" if risk_per_unit > 0 else "N/A"
+
+        # Percentage P&L at each level
+        risk_pct = (risk_per_unit / entry * 100) if entry > 0 else 0
+        profit_tp1_pct = (reward_tp1 / entry * 100) if entry > 0 else 0
+        profit_tp2_pct = (reward_tp2 / entry * 100) if entry > 0 else 0
+        profit_tp3_pct = (reward_tp3 / entry * 100) if entry > 0 else 0
+
+        # Score breakdown summary
+        breakdown_lines = []
+        for k, v in sorted(proposal.score_breakdown.items(), key=lambda x: -abs(x[1])):
+            if v != 0:
+                breakdown_lines.append(f"{k}: {v:+.1f}")
+        score_summary = " | ".join(breakdown_lines[:6]) if breakdown_lines else "N/A"
+
         text = (
-            f"{direction_emoji} *TRADE PROPOSAL: {proposal.symbol} {proposal.direction.value.upper()}*\n"
-            f"Score: {proposal.raw_score:.1f} | Confidence: {proposal.ai_confidence:.0%} [{confidence_bar}]"
+            f"*TRADE PROPOSAL: {proposal.symbol} {direction_label}*\n"
+            f"Score: {proposal.raw_score:.1f} | R:R {rr_ratio} | Max loss: {risk_pct:.1f}%\n"
+            f"Reply APPROVE or REJECT"
         )
 
         blocks = [
             {
                 "type": "header",
-                "text": {"type": "plain_text", "text": f"{proposal.symbol} — {proposal.direction.value.upper()} Proposal"}
+                "text": {"type": "plain_text", "text": f"TRADE PROPOSAL — {proposal.symbol} {direction_label}"}
             },
             {
                 "type": "section",
                 "fields": [
-                    {"type": "mrkdwn", "text": f"*Direction:*\n{direction_emoji} {proposal.direction.value.upper()}"},
-                    {"type": "mrkdwn", "text": f"*Score:*\n{proposal.raw_score:.1f}"},
+                    {"type": "mrkdwn", "text": f"*Direction:*\n{direction_label}"},
+                    {"type": "mrkdwn", "text": f"*Signal Score:*\n{proposal.raw_score:.1f}"},
                     {"type": "mrkdwn", "text": f"*AI Confidence:*\n{proposal.ai_confidence:.0%} [{confidence_bar}]"},
-                    {"type": "mrkdwn", "text": f"*Entry:*\n${proposal.suggested_entry:,.2f}"},
-                    {"type": "mrkdwn", "text": f"*Stop:*\n${proposal.suggested_stop:,.2f}"},
-                    {"type": "mrkdwn", "text": f"*TP1 / TP2 / TP3:*\n${proposal.suggested_tp1:,.2f} / ${proposal.suggested_tp2:,.2f} / ${proposal.suggested_tp3:,.2f}"},
+                    {"type": "mrkdwn", "text": f"*Risk/Reward:*\n{rr_ratio}"},
                 ]
+            },
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*Entry and Targets*"}
             },
             {
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*Rationale:*\n>{proposal.ai_rationale[:500]}"}
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*Entry:*\n${entry:,.2f}"},
+                    {"type": "mrkdwn", "text": f"*Stop Loss:*\n${stop:,.2f} (-{risk_pct:.1f}%)"},
+                    {"type": "mrkdwn", "text": f"*Target 1:*\n${tp1:,.2f} (+{profit_tp1_pct:.1f}%)"},
+                    {"type": "mrkdwn", "text": f"*Target 2:*\n${tp2:,.2f} (+{profit_tp2_pct:.1f}%)"},
+                    {"type": "mrkdwn", "text": f"*Target 3:*\n${tp3:,.2f} (+{profit_tp3_pct:.1f}%)"},
+                    {"type": "mrkdwn", "text": f"*Max Loss per Unit:*\n${risk_per_unit:,.2f}"},
+                ]
+            },
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": (
+                    "*Exit Strategy (Automated)*\n"
+                    f"• Stop loss at ${stop:,.2f} (-{risk_pct:.1f}%) — hard stop, executes immediately\n"
+                    f"• TP1 at ${tp1:,.2f} (+{profit_tp1_pct:.1f}%) — close 40% of position\n"
+                    f"• TP2 at ${tp2:,.2f} (+{profit_tp2_pct:.1f}%) — close 30%, move stop to breakeven\n"
+                    f"• TP3 at ${tp3:,.2f} (+{profit_tp3_pct:.1f}%) — close remaining 30%\n"
+                    f"• Trailing stop activates after TP1 hit (2.5x ATR)"
+                )}
+            },
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f"*Rationale:*\n>{proposal.ai_rationale[:400]}"}
             },
             {
                 "type": "context",
                 "elements": [
-                    {"type": "mrkdwn", "text": f"Proposal ID: `{proposal.proposal_id}` | Auto-expires in 30 min | React :thumbsup: to approve, :thumbsdown: to reject"}
+                    {"type": "mrkdwn", "text": f"Score breakdown: {score_summary}"}
                 ]
             },
             {"type": "divider"},
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "*Reply to this message with APPROVE or REJECT*\nAuto-expires in 30 minutes if no response."},
+            },
+            {
+                "type": "context",
+                "elements": [
+                    {"type": "mrkdwn", "text": f"Proposal: `{proposal.proposal_id}`"}
+                ]
+            },
         ]
 
         return text, blocks
@@ -156,26 +220,26 @@ class SlackNotifier:
     def _format_risk_decision(self, event: RiskAssessmentEvent) -> str:
         """Format a risk assessment decision."""
         if event.decision.value == "approved":
-            emoji = "✅"
+            status = "APPROVED"
             size_info = f" | Size: ${event.approved_size_usd:,.0f} ({event.approved_size_pct_portfolio:.1%} of portfolio)" if event.approved_size_usd else ""
         elif event.decision.value == "vetoed":
-            emoji = "❌"
+            status = "REJECTED"
             size_info = f" | Reason: {event.veto_reason}" if event.veto_reason else ""
         else:
-            emoji = "⚠️"
+            status = "MODIFIED"
             size_info = ""
 
         return (
-            f"{emoji} *RISK DECISION: {event.decision.value.upper()}* — `{event.proposal_id}`{size_info}\n"
+            f"*RISK DECISION: {status}* — `{event.proposal_id}`{size_info}\n"
             f"Risk score: {event.risk_score:.1f} | Open positions: {event.open_positions_count}"
         )
 
     def _format_smart_money(self, event: SmartMoneyEvent) -> str:
         """Format a smart money alert."""
-        dir_emoji = "🟢" if event.direction == "bullish" else "🔴" if event.direction == "bearish" else "⚪"
+        direction = event.direction.upper()
         symbols = ", ".join(event.symbols)
         return (
-            f"{dir_emoji} *SMART MONEY [{event.signal_type.upper()}]*: {symbols}\n"
+            f"*SMART MONEY [{event.signal_type.upper()}]* — {symbols} ({direction})\n"
             f"Chain: {event.chain} | Confidence: {event.confidence:.0%} | "
             f"Price: ${event.price_usd:,.4f} ({event.price_change_24h:+.1f}%)\n"
             f">{event.reason}"
@@ -183,11 +247,10 @@ class SlackNotifier:
 
     def _format_whale_signal(self, signal: dict) -> str:
         """Format a whale trigger alert."""
-        direction = signal.get("direction", "neutral")
-        emoji = "🐋🟢" if direction == "bullish" else "🐋🔴" if direction == "bearish" else "🐋"
+        direction = signal.get("direction", "neutral").upper()
         strength = signal.get("strength", 0)
         return (
-            f"{emoji} *WHALE TRIGGER* [{direction.upper()}] str={strength}/5\n"
+            f"*WHALE TRIGGER* [{direction}] strength={strength}/5\n"
             f">{signal.get('reason', 'Unknown')}"
         )
 
@@ -301,9 +364,7 @@ class SlackNotifier:
 
         bias = briefing.get("bias", "NEUTRAL")
         score = briefing.get("score", 0)
-        bias_emoji = "🟢" if "BULL" in bias else "🔴" if "BEAR" in bias else "⚪"
-
-        sections = [f"{bias_emoji} *MORNING BRIEFING* — {datetime.now().strftime('%b %d, %Y')}"]
+        sections = [f"*MORNING BRIEFING* — {datetime.now().strftime('%b %d, %Y')}"]
         sections.append(f"*Market Bias:* {bias} (score: {score:+d})")
 
         if briefing.get("key_levels"):
@@ -339,7 +400,7 @@ class SlackNotifier:
                 await self.update_message(
                     info["channel"],
                     info["message_ts"],
-                    f"⏰ *EXPIRED* — {info['symbol']} {info['direction'].upper()} proposal auto-vetoed (no response in 30 min)",
+                    f"*EXPIRED* — {info['symbol']} {info['direction'].upper()} proposal auto-rejected (no response in 30 min)",
                 )
                 logger.info(f"SlackNotifier: proposal {pid} expired")
 
