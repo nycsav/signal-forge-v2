@@ -136,6 +136,10 @@ class SlackNotifier:
         profit_tp2_pct = (reward_tp2 / entry * 100) if entry > 0 else 0
         profit_tp3_pct = (reward_tp3 / entry * 100) if entry > 0 else 0
 
+        # Blended profit if all targets hit (40/30/30 split)
+        blended_profit_pct = (0.4 * profit_tp1_pct) + (0.3 * profit_tp2_pct) + (0.3 * profit_tp3_pct)
+        blended_profit_usd = (0.4 * reward_tp1) + (0.3 * reward_tp2) + (0.3 * reward_tp3)
+
         # Score breakdown summary
         breakdown_lines = []
         for k, v in sorted(proposal.score_breakdown.items(), key=lambda x: -abs(x[1])):
@@ -145,7 +149,8 @@ class SlackNotifier:
 
         text = (
             f"*TRADE PROPOSAL: {proposal.symbol} {direction_label}*\n"
-            f"Score: {proposal.raw_score:.1f} | R:R {rr_ratio} | Max loss: {risk_pct:.1f}%\n"
+            f"Profit: +${blended_profit_usd:,.2f}/unit (+{blended_profit_pct:.1f}%) | "
+            f"Risk: -${risk_per_unit:,.2f}/unit (-{risk_pct:.1f}%) | R:R {rr_ratio}\n"
             f"Reply APPROVE or REJECT"
         )
 
@@ -156,39 +161,37 @@ class SlackNotifier:
             },
             {
                 "type": "section",
+                "text": {"type": "mrkdwn", "text": (
+                    f"*Potential Profit:* +${blended_profit_usd:,.2f}/unit (+{blended_profit_pct:.1f}%)  |  "
+                    f"*Max Risk:* -${risk_per_unit:,.2f}/unit (-{risk_pct:.1f}%)  |  "
+                    f"*R:R:* {rr_ratio}"
+                )}
+            },
+            {
+                "type": "section",
                 "fields": [
-                    {"type": "mrkdwn", "text": f"*Direction:*\n{direction_label}"},
                     {"type": "mrkdwn", "text": f"*Signal Score:*\n{proposal.raw_score:.1f}"},
                     {"type": "mrkdwn", "text": f"*AI Confidence:*\n{proposal.ai_confidence:.0%} [{confidence_bar}]"},
-                    {"type": "mrkdwn", "text": f"*Risk/Reward:*\n{rr_ratio}"},
-                ]
-            },
-            {"type": "divider"},
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "*Entry and Targets*"}
-            },
-            {
-                "type": "section",
-                "fields": [
-                    {"type": "mrkdwn", "text": f"*Entry:*\n${entry:,.2f}"},
-                    {"type": "mrkdwn", "text": f"*Stop Loss:*\n${stop:,.2f} (-{risk_pct:.1f}%)"},
-                    {"type": "mrkdwn", "text": f"*Target 1:*\n${tp1:,.2f} (+{profit_tp1_pct:.1f}%)"},
-                    {"type": "mrkdwn", "text": f"*Target 2:*\n${tp2:,.2f} (+{profit_tp2_pct:.1f}%)"},
-                    {"type": "mrkdwn", "text": f"*Target 3:*\n${tp3:,.2f} (+{profit_tp3_pct:.1f}%)"},
-                    {"type": "mrkdwn", "text": f"*Max Loss per Unit:*\n${risk_per_unit:,.2f}"},
                 ]
             },
             {"type": "divider"},
             {
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": (
-                    "*Exit Strategy (Automated)*\n"
-                    f"• Stop loss at ${stop:,.2f} (-{risk_pct:.1f}%) — hard stop, executes immediately\n"
-                    f"• TP1 at ${tp1:,.2f} (+{profit_tp1_pct:.1f}%) — close 40% of position\n"
-                    f"• TP2 at ${tp2:,.2f} (+{profit_tp2_pct:.1f}%) — close 30%, move stop to breakeven\n"
-                    f"• TP3 at ${tp3:,.2f} (+{profit_tp3_pct:.1f}%) — close remaining 30%\n"
-                    f"• Trailing stop activates after TP1 hit (2.5x ATR)"
+                    f"*Entry:* ${entry:,.2f}\n"
+                    f"*Stop Loss:* ${stop:,.2f}  —  lose ${risk_per_unit:,.2f}/unit (-{risk_pct:.1f}%)\n\n"
+                    f"*Target 1:* ${tp1:,.2f}  —  profit ${reward_tp1:,.2f}/unit (+{profit_tp1_pct:.1f}%)  —  close 40%\n"
+                    f"*Target 2:* ${tp2:,.2f}  —  profit ${reward_tp2:,.2f}/unit (+{profit_tp2_pct:.1f}%)  —  close 30%, move stop to breakeven\n"
+                    f"*Target 3:* ${tp3:,.2f}  —  profit ${reward_tp3:,.2f}/unit (+{profit_tp3_pct:.1f}%)  —  close final 30%"
+                )}
+            },
+            {"type": "divider"},
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": (
+                    f"*Exit Strategy (Automated):* "
+                    f"Hard stop at ${stop:,.2f}. Scale out 40/30/30 at TP1/TP2/TP3. "
+                    f"After TP1, trailing stop activates at 2.5x ATR. After TP2, stop moves to breakeven."
                 )}
             },
             {"type": "divider"},
@@ -199,13 +202,13 @@ class SlackNotifier:
             {
                 "type": "context",
                 "elements": [
-                    {"type": "mrkdwn", "text": f"Score breakdown: {score_summary}"}
+                    {"type": "mrkdwn", "text": f"Score: {score_summary}"}
                 ]
             },
             {"type": "divider"},
             {
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": "*Reply to this message with APPROVE or REJECT*\nAuto-expires in 30 minutes if no response."},
+                "text": {"type": "mrkdwn", "text": "*Reply APPROVE or REJECT*  —  auto-expires in 30 min"},
             },
             {
                 "type": "context",
