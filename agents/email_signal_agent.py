@@ -74,7 +74,7 @@ class EmailSignalAgent:
         self.db_path = config.get("database_path", settings.database_path)
         self.gmail_mcp_server_path = config.get("gmail_mcp_server_path", GMAIL_MCP_SERVER_PATH_DEFAULT)
         self.gmail_mcp_args = ["tsx", self.gmail_mcp_server_path]
-        self.scan_hours_est = config.get("email_scan_hours_est", self.scan_hours_est_DEFAULT)
+        self.scan_hours_est = config.get("email_scan_hours_est", SCAN_HOURS_EST_DEFAULT)
         self.enabled = config.get("email_signal_enabled", True)
 
         # In-memory signal cache: symbol -> list[EmailSignalEvent]
