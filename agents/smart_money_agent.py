@@ -127,11 +127,19 @@ class SmartMoneyAgent:
     # ── Data Fetchers ─────────────────────────────────────────
 
     async def _fetch_trending(self) -> list[dict]:
-        """Fetch trending DEX tokens across priority chains."""
+        """Fetch trending DEX tokens across priority chains.
+        Tries GET first (CMC returns 403 on POST for this endpoint), falls back to POST.
+        """
         results = []
-        data = await self._request("POST", "/v4/dex/token/trending", json={
+        # Try GET first — CMC trending endpoint expects GET
+        data = await self._request("GET", "/v4/dex/token/trending", params={
             "limit": MAX_TOKENS_PER_SCAN,
         })
+        if not data:
+            # Fallback to POST in case API changes
+            data = await self._request("POST", "/v4/dex/token/trending", json={
+                "limit": MAX_TOKENS_PER_SCAN,
+            })
         if not data:
             return results
 
@@ -242,11 +250,19 @@ class SmartMoneyAgent:
         return results
 
     async def _fetch_new_tokens(self) -> list[dict]:
-        """Fetch newly listed tokens for early discovery."""
+        """Fetch newly listed tokens for early discovery.
+        Tries GET first (CMC returns 403 on POST for this endpoint), falls back to POST.
+        """
         results = []
-        data = await self._request("POST", "/v4/dex/token/new", json={
+        # Try GET first — CMC new token endpoint expects GET
+        data = await self._request("GET", "/v4/dex/token/new", params={
             "limit": 20,
         })
+        if not data:
+            # Fallback to POST in case API changes
+            data = await self._request("POST", "/v4/dex/token/new", json={
+                "limit": 20,
+            })
         if not data:
             return results
 

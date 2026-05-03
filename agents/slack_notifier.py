@@ -94,14 +94,52 @@ class SlackNotifier:
             return None
 
     async def send_message(self, channel: str, text: str, blocks: list | None = None) -> str | None:
-        """Send a message to a Slack channel. Returns message timestamp."""
+        """Send a message to a Slack channel. Returns message timestamp.
+        Auto-joins channel on not_in_channel error (requires channels:join scope).
+        """
         payload = {"channel": channel, "text": text}
         if blocks:
             payload["blocks"] = blocks
-        result = await self._post("chat.postMessage", payload)
-        if result:
+
+        # First attempt
+        result = await self._post_raw("chat.postMessage", payload)
+        if result and result.get("ok"):
             return result.get("ts")
+
+        # Handle not_in_channel: join then retry
+        if result and result.get("error") == "not_in_channel":
+            logger.info(f"SlackNotifier: not in channel {channel}, attempting to join...")
+            join_result = await self._post_raw("conversations.join", {"channel": channel})
+            if join_result and join_result.get("ok"):
+                logger.info(f"SlackNotifier: joined channel {channel}")
+                retry = await self._post("chat.postMessage", payload)
+                if retry:
+                    return retry.get("ts")
+            else:
+                join_err = join_result.get("error", "unknown") if join_result else "no response"
+                logger.error(
+                    f"SlackNotifier: failed to join channel {channel}: {join_err}. "
+                    f"Ensure the bot has the 'channels:join' scope."
+                )
         return None
+
+    async def _post_raw(self, method: str, payload: dict) -> dict | None:
+        """Make an authenticated Slack API call, returning raw response (including errors)."""
+        headers = {
+            "Authorization": f"Bearer {self.bot_token}",
+            "Content-Type": "application/json",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                resp = await client.post(
+                    f"{SLACK_API_BASE}/{method}",
+                    headers=headers,
+                    json=payload,
+                )
+                return resp.json()
+        except Exception as e:
+            logger.error(f"SlackNotifier: API error on {method}: {e}")
+            return None
 
     async def update_message(self, channel: str, ts: str, text: str, blocks: list | None = None):
         """Update an existing Slack message."""

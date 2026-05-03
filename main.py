@@ -272,6 +272,7 @@ class SignalForgeOrchestrator:
         # ── PERPLEXITY MULTI-FACTOR INTELLIGENCE ──
         pplx_bonus = 0
         pplx_intel = {}
+        breakdown = {}
         try:
             from modules.perplexity_intel import (
                 get_market_intel, should_call_sonar, compute_sonar_bonus,
