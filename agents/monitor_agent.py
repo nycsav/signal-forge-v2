@@ -29,7 +29,8 @@ class MonitorAgent:
     # New: 2.0x stop, 2R/4R/6R TPs → positive expectancy at 44%+ win rate
     ATR_STOP_MULT = 1.5  # tightened from 2.0 — hard stop avg was still -$5.27
     ATR_ACTIVATION_MULT = 1.5  # raised from 0.75 — let winners run, avg win was only $1.61
-    MAX_LOSS_PER_TRADE_USD = 10.0  # tightened from $15 — worst loss was $17, target max $10
+    MAX_LOSS_PER_TRADE_USD = 500.0  # raised from $10 — positions are now $1K-$18K, $10 was 0.08% noise
+    MAX_LOSS_PER_TRADE_PCT = 0.03  # 3% of position value as hard stop fallback
     TP1_R = 2.0   # TP1 at 2× risk (was 1.5)
     TP2_R = 4.0   # TP2 at 4× risk (was 3.0)
     TP3_R = 6.0   # TP3 at 6× risk (was 5.0)
@@ -262,8 +263,11 @@ class MonitorAgent:
             # ── Layer 0: Absolute Dollar Cap ──
             qty = float(pos.get("qty", 0) if isinstance(pos, dict) else pos.qty)
             upl_usd = (current - entry) * qty
-            if upl_usd < -self.MAX_LOSS_PER_TRADE_USD:
-                logger.warning(f"Monitor DOLLAR CAP: {symbol} loss ${upl_usd:.2f} exceeds -${self.MAX_LOSS_PER_TRADE_USD}")
+            position_value = entry * qty
+            pct_loss_cap = position_value * self.MAX_LOSS_PER_TRADE_PCT
+            effective_cap = max(self.MAX_LOSS_PER_TRADE_USD, pct_loss_cap)
+            if upl_usd < -effective_cap:
+                logger.warning(f"Monitor DOLLAR CAP: {symbol} loss ${upl_usd:.2f} exceeds -${effective_cap:.2f} (3% of ${position_value:.0f})")
                 await self._close_position(pos, "hard_stop", current)
                 actions_taken += 1
                 continue
