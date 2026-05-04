@@ -168,17 +168,20 @@ class EmailSignalAgent:
         )
 
     async def _run_forever(self) -> None:
-        """Main loop: immediate scan on startup, then scheduled at EST hours."""
+        """Main loop: immediate scan on startup, then every 2 hours.
+        Changed from 3x/day scheduled times to 2-hour intervals to capture
+        fast-moving signals from newsletters and market alerts.
+        """
         # Immediate scan on startup
         await self._safe_scan("startup")
 
+        scan_interval = 7200  # 2 hours in seconds
         while True:
             try:
-                sleep_secs = self._seconds_until_next_scan()
                 logger.info(
-                    f"EmailSignalAgent: next scan in {sleep_secs / 60:.0f} min"
+                    f"EmailSignalAgent: next scan in {scan_interval / 60:.0f} min"
                 )
-                await asyncio.sleep(sleep_secs)
+                await asyncio.sleep(scan_interval)
                 await self._safe_scan("scheduled")
             except asyncio.CancelledError:
                 logger.info("EmailSignalAgent: cancelled")
