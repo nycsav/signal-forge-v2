@@ -1,6 +1,6 @@
 """Signal Forge v2 — Email Signal Agent
 
-Polls Gmail via MCP subprocess for 6 newsletter sources, extracts trading
+Polls Gmail via gmail-bridge CLI for 6 newsletter sources, extracts trading
 signals via Ollama (Qwen3), cross-validates across sources, and publishes
 EmailSignalEvents to the EventBus.
 
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
@@ -39,7 +40,6 @@ EST = ZoneInfo("America/New_York")
 SCAN_HOURS_EST_DEFAULT = [6, 14, 22]
 
 GMAIL_MCP_SERVER_PATH_DEFAULT = "/Users/sav/gmail-mcp-server/src/server.ts"
-GMAIL_MCP_COMMAND = "npx"
 
 MAX_EMAILS_PER_SOURCE = 20
 LOOKBACK_HOURS = 10
@@ -73,7 +73,6 @@ class EmailSignalAgent:
         self.extract_model = config.get("extract_model", "qwen3:14b")
         self.db_path = config.get("database_path", settings.database_path)
         self.gmail_mcp_server_path = config.get("gmail_mcp_server_path", GMAIL_MCP_SERVER_PATH_DEFAULT)
-        self.gmail_mcp_args = ["tsx", self.gmail_mcp_server_path]
         self.scan_hours_est = config.get("email_scan_hours_est", SCAN_HOURS_EST_DEFAULT)
         self.enabled = config.get("email_signal_enabled", True)
 
@@ -84,9 +83,6 @@ class EmailSignalAgent:
         # Regime / fragility state derived from latest scan
         self._regime_adjustment: float = 0.0     # +/- modifier for regime
         self._fragility_flag: bool = False        # True if risk events detected
-
-        # MCP session (created per scan)
-        self._mcp_session = None
 
         self._ensure_db_table()
 
@@ -268,25 +264,17 @@ class EmailSignalAgent:
         extract_prompt_template = source_cfg["extract_prompt"]
         bonus_map = source_cfg["score_bonus_map"]
 
-        # Search Gmail via MCP
-        search_results = await self._gmail_mcp_call(
-            "search_emails",
-            {"query": gmail_query, "max_results": MAX_EMAILS_PER_SOURCE},
-        )
+        # Search Gmail via gmail-bridge CLI
+        search_results = await self._gmail_bridge_search(gmail_query, MAX_EMAILS_PER_SOURCE)
 
         if not search_results:
             logger.debug(f"EmailSignalAgent: {source_name} — no emails found")
             return []
 
-        # Parse search results
-        emails = self._parse_mcp_result(search_results)
-        if not emails:
-            return []
-
         signals: list[EmailSignalEvent] = []
         processed_count = 0
 
-        for email_summary in emails[:MAX_EMAILS_PER_SOURCE]:
+        for email_summary in search_results[:MAX_EMAILS_PER_SOURCE]:
             msg_id = email_summary.get("id", "")
             if not msg_id:
                 continue
@@ -295,12 +283,9 @@ class EmailSignalAgent:
             if self._is_processed(msg_id):
                 continue
 
-            # Fetch full email body
+            # Fetch full email body via gmail-bridge
             try:
-                full_email = await self._gmail_mcp_call(
-                    "read_email",
-                    {"message_id": msg_id, "format": "full"},
-                )
+                full_email = await self._gmail_bridge_read(msg_id)
                 body_text = self._extract_body_text(full_email)
             except Exception as e:
                 logger.debug(
@@ -627,77 +612,89 @@ class EmailSignalAgent:
         except Exception as e:
             logger.warning(f"Label error for {message_id}: {e}")
 
-    # ── Gmail MCP Integration ─────────────────────────────────
+    # ── Gmail Bridge Integration ────────────────────────────────
 
-    async def _gmail_mcp_call(self, tool_name: str, arguments: dict) -> list | dict | None:
-        """Call a Gmail MCP tool via stdio subprocess.
-
-        Starts a fresh MCP subprocess connection per call.
-        Timeout: GMAIL_CALL_TIMEOUT seconds.
-        """
-        try:
-            from mcp.client.stdio import stdio_client, StdioServerParameters
-            from mcp import ClientSession
-        except ImportError:
-            logger.error("EmailSignalAgent: mcp package not installed")
-            return None
-
-        server_params = StdioServerParameters(
-            command=GMAIL_MCP_COMMAND,
-            args=self.gmail_mcp_args,
+    def _get_bridge_path(self) -> str:
+        """Return the absolute path to gmail-bridge.ts."""
+        return os.path.join(
+            os.path.dirname(self.gmail_mcp_server_path),
+            "..", "scripts", "gmail-bridge.ts"
         )
 
+    def _get_bridge_cwd(self) -> str:
+        """Return the cwd for running gmail-bridge (the gmail-mcp-server root)."""
+        return os.path.join(
+            os.path.dirname(self.gmail_mcp_server_path), ".."
+        )
+
+    async def _gmail_bridge_search(self, query: str, max_results: int) -> list[dict]:
+        """Search Gmail via gmail-bridge CLI. Returns list of message dicts."""
+        bridge = self._get_bridge_path()
         try:
-            async with stdio_client(server_params) as (read_stream, write_stream):
-                async with ClientSession(read_stream, write_stream) as session:
-                    await asyncio.wait_for(
-                        session.initialize(),
-                        timeout=GMAIL_CALL_TIMEOUT,
-                    )
-                    result = await asyncio.wait_for(
-                        session.call_tool(tool_name, arguments=arguments),
-                        timeout=GMAIL_CALL_TIMEOUT,
-                    )
-                    return self._parse_mcp_result_raw(result)
+            proc = await asyncio.create_subprocess_exec(
+                "npx", "tsx", bridge, "search", query, str(max_results),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self._get_bridge_cwd(),
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=GMAIL_CALL_TIMEOUT
+            )
+            if proc.returncode != 0:
+                logger.warning(
+                    f"EmailSignalAgent: bridge search failed: {stderr.decode()[:300]}"
+                )
+                return []
+            data = json.loads(stdout.decode())
+            if isinstance(data, list):
+                return data
+            if isinstance(data, dict):
+                return data.get("messages", data.get("results", [data]))
+            return []
         except asyncio.TimeoutError:
             logger.warning(
-                f"EmailSignalAgent: Gmail MCP timeout ({tool_name}, {GMAIL_CALL_TIMEOUT}s)"
+                f"EmailSignalAgent: bridge search timeout ({GMAIL_CALL_TIMEOUT}s)"
             )
         except Exception as e:
-            logger.error(f"EmailSignalAgent: Gmail MCP error ({tool_name}): {e}")
-        return None
-
-    @staticmethod
-    def _parse_mcp_result_raw(result) -> list | dict | None:
-        """Parse raw MCP result into Python data."""
-        for item in getattr(result, "content", []) or []:
-            text = getattr(item, "text", None)
-            if not text:
-                continue
-            try:
-                data = json.loads(text)
-                return data
-            except json.JSONDecodeError:
-                continue
-        return None
-
-    @staticmethod
-    def _parse_mcp_result(data) -> list[dict]:
-        """Normalize MCP search results into a list of email summary dicts."""
-        if isinstance(data, list):
-            return data
-        if isinstance(data, dict):
-            # Handle paginated or wrapped results
-            if "messages" in data:
-                return data["messages"]
-            if "results" in data:
-                return data["results"]
-            return [data]
+            logger.error(f"EmailSignalAgent: bridge search error: {e}")
         return []
+
+    async def _gmail_bridge_read(self, message_id: str) -> dict | None:
+        """Read a single email via gmail-bridge CLI. Returns message dict with full body."""
+        bridge = self._get_bridge_path()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "npx", "tsx", bridge, "read", message_id,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=self._get_bridge_cwd(),
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=GMAIL_CALL_TIMEOUT
+            )
+            if proc.returncode != 0:
+                logger.warning(
+                    f"EmailSignalAgent: bridge read failed for {message_id}: "
+                    f"{stderr.decode()[:300]}"
+                )
+                return None
+            data = json.loads(stdout.decode())
+            return data if isinstance(data, dict) else None
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"EmailSignalAgent: bridge read timeout ({GMAIL_CALL_TIMEOUT}s)"
+            )
+        except Exception as e:
+            logger.error(f"EmailSignalAgent: bridge read error ({message_id}): {e}")
+        return None
 
     @staticmethod
     def _extract_body_text(email_data) -> str:
-        """Extract plain text body from a full email MCP response."""
+        """Extract plain text body from a gmail-bridge response.
+
+        The bridge returns a dict with a 'body' field containing the full
+        email text (already decoded). Falls back to snippet if body missing.
+        """
         if not email_data:
             return ""
 
@@ -705,7 +702,7 @@ class EmailSignalAgent:
             return strip_html(email_data)
 
         if isinstance(email_data, dict):
-            # Try common body field paths
+            # gmail-bridge returns body as a ready-to-use text field
             body = (
                 email_data.get("body")
                 or email_data.get("text")
@@ -716,49 +713,7 @@ class EmailSignalAgent:
             if body:
                 return strip_html(body) if "<" in body else body
 
-            # Try HTML body
-            html_body = (
-                email_data.get("htmlBody")
-                or email_data.get("html_body")
-                or email_data.get("html")
-                or ""
-            )
-            if html_body:
-                return strip_html(html_body)
-
-            # Try payload structure (Gmail API format)
-            payload = email_data.get("payload", {})
-            if isinstance(payload, dict):
-                parts = payload.get("parts", [])
-                for part in parts:
-                    mime = part.get("mimeType", "")
-                    part_body = part.get("body", {}).get("data", "")
-                    if mime == "text/plain" and part_body:
-                        import base64
-                        try:
-                            decoded = base64.urlsafe_b64decode(part_body + "==").decode("utf-8", errors="replace")
-                            return decoded
-                        except Exception:
-                            pass
-                    elif mime == "text/html" and part_body:
-                        import base64
-                        try:
-                            decoded = base64.urlsafe_b64decode(part_body + "==").decode("utf-8", errors="replace")
-                            return strip_html(decoded)
-                        except Exception:
-                            pass
-
-                # Single-part message
-                body_data = payload.get("body", {}).get("data", "")
-                if body_data:
-                    import base64
-                    try:
-                        decoded = base64.urlsafe_b64decode(body_data + "==").decode("utf-8", errors="replace")
-                        return strip_html(decoded) if "<" in decoded else decoded
-                    except Exception:
-                        pass
-
-            # Fallback: stringify the whole thing
+            # Fallback to snippet
             snippet = email_data.get("snippet", "")
             if snippet:
                 return snippet

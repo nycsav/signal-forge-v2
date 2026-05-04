@@ -34,6 +34,7 @@ from agents.altfins_enrichment import AltFINSEnrichment
 from agents.email_signal_agent import EmailSignalAgent
 from agents.smart_money_agent import SmartMoneyAgent
 from agents.slack_notifier import SlackNotifier
+from agents.morning_plan import MorningPlanGenerator
 from agents.events import EmailSignalEvent, SmartMoneyEvent
 from agents.scoring import SignalScorer
 from agents.sr_strategy import SRStrategy
@@ -89,6 +90,9 @@ class SignalForgeOrchestrator:
         # Slack Notifier (trade proposals + signal alerts)
         self.slack = SlackNotifier(self.bus, config)
         self.slack.subscribe_to_events()
+
+        # Morning Plan Generator (daily 6:30 AM ET trading plan)
+        self.morning_plan = MorningPlanGenerator(config)
 
         # New entry strategies (added 2026-04-19 after Day 3 review)
         self.sr_strategy = SRStrategy(self.bus)           # S/R mean reversion
@@ -448,6 +452,7 @@ class SignalForgeOrchestrator:
             asyncio.create_task(self.chart_patterns.run_forever(interval_seconds=14400)),  # 4h pattern scan
             asyncio.create_task(self.smart_money.run_forever()),  # 15min CMC DexScan smart money
             asyncio.create_task(self.slack.run_expiry_loop()),  # 30min auto-veto for unanswered proposals
+            asyncio.create_task(self.morning_plan.run_forever()),  # Daily 6:30 AM ET trading plan
         ]
 
         # Dashboard runs separately on port 8888 (dashboard_server.py)

@@ -50,7 +50,7 @@ class Settings(BaseSettings):
     max_open_positions: int = 5
 
     # Watchlist — restricted to high-liquidity, low-spread majors
-    watchlist: list[str] = ["BTC-USD", "ETH-USD", "SOL-USD"]
+    watchlist: list[str] = ["BTC-USD", "ETH-USD", "SOL-USD", "LINK-USD", "AAVE-USD", "HYPE-USD"]
 
     # Slack Notifier
     slack_bot_token: str = ""       # xoxb-... Bot User OAuth Token

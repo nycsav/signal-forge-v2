@@ -176,11 +176,33 @@ MULTI_FACTOR_SCHEMA = {
 }
 
 
+def _is_empty_intel(result: dict) -> bool:
+    """Check if Sonar returned a structurally valid but empty/zero response."""
+    if "error" in result or "raw" in result:
+        return True
+    sent = result.get("sentiment", {})
+    score = sent.get("score", 0)
+    conf = sent.get("confidence", 0)
+    edge = result.get("edge_score", 0)
+    citations = result.get("_citations", [])
+    # No citations means Perplexity search returned nothing — data is unreliable
+    if not citations:
+        return True
+    # Zero score + low confidence + zero edge = no real analysis happened
+    if score == 0 and conf < 0.3 and edge == 0:
+        return True
+    return False
+
+
 def get_market_intel(symbol: str, asset_type: str = "crypto") -> dict:
     """
     Multi-factor intelligence for any asset (crypto or stock).
     Returns sentiment + catalysts + edge_score in one call.
     This is the primary Sonar function — replaces get_crypto_sentiment.
+
+    Strategy: Call without domain filter (Perplexity's search is broad enough).
+    Use recency="day" to ensure data availability, prompt still asks for recent data.
+    If the first call returns empty/zero scores, retry with recency="week" as fallback.
     """
     clean_sym = symbol.replace("-USD", "").replace("/USD", "")
 
@@ -190,11 +212,10 @@ def get_market_intel(symbol: str, asset_type: str = "crypto") -> dict:
             f"1. Sentiment score (-100 bearish to +100 bullish) with confidence (0-1)\n"
             f"2. Edge score (-1 to +1): your trade recommendation bias\n"
             f"3. Top catalysts: any earnings/regulatory/macro factors\n"
-            f"4. News summary: top 3 headlines from the last hour with impact (H/M/L)\n"
+            f"4. News summary: top 3 headlines with impact (H/M/L)\n"
             f"5. Risk flags: any concerns (high_vol, stale_data, conflicting_signals)\n"
-            f"Sources: real-time only. Timeframe: last 1 hour."
+            f"Use the most recent data available. Focus on the last 24 hours."
         )
-        domains = ["coindesk.com", "theblock.co", "decrypt.co", "cointelegraph.com", "reuters.com"]
     else:
         prompt = (
             f"Analyze {clean_sym} stock/ETF RIGHT NOW for options trading. Return:\n"
@@ -203,27 +224,50 @@ def get_market_intel(symbol: str, asset_type: str = "crypto") -> dict:
             f"3. Catalysts: recent earnings (beat/miss/guidance), regulatory news, macro impact\n"
             f"4. News summary: top 3 headlines with market impact (H/M/L)\n"
             f"5. Risk flags: earnings_imminent, high_iv, stale_data, conflicting_signals\n"
-            f"Sources: real-time only. Timeframe: last 1 hour."
+            f"Use the most recent data available. Focus on the last 24 hours."
         )
-        domains = ["reuters.com", "bloomberg.com", "wsj.com", "cnbc.com", "seekingalpha.com"]
 
     mark_called(symbol)
 
+    # Primary call: no domain filter, recency="day" for broad coverage
     result = _call_sonar(
         prompt=prompt,
         json_schema=MULTI_FACTOR_SCHEMA,
-        recency="hour",
-        domains=domains,
-        timeout=15,
+        recency="day",
+        domains=None,
+        timeout=20,
     )
 
-    if "error" not in result:
+    # Fallback: if first call returned empty/zero data, retry with week recency
+    if _is_empty_intel(result):
+        logger.warning(
+            f"PPLX INTEL: {symbol} — first call returned empty data "
+            f"(citations={len(result.get('_citations', []))}), retrying with recency=week"
+        )
+        time.sleep(1)  # brief pause before retry
+        result = _call_sonar(
+            prompt=prompt,
+            json_schema=MULTI_FACTOR_SCHEMA,
+            recency="week",
+            domains=None,
+            timeout=25,
+        )
+
+    if "error" in result:
+        logger.warning(f"PPLX INTEL: {symbol} — API error: {result.get('error')}")
+    elif "raw" in result:
+        logger.warning(
+            f"PPLX INTEL: {symbol} — JSON parse failed, raw response: "
+            f"{result.get('raw', '')[:200]}"
+        )
+    else:
         sent = result.get("sentiment", {})
         edge = result.get("edge_score", 0)
+        n_citations = len(result.get("_citations", []))
         logger.info(
             f"PPLX INTEL: {symbol} → {sent.get('direction', '?')} "
             f"(score={sent.get('score', 0)}, conf={sent.get('confidence', 0):.2f}, "
-            f"edge={edge:+.2f})"
+            f"edge={edge:+.2f}, citations={n_citations})"
         )
 
     return result
